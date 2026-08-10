@@ -19,8 +19,19 @@ function emitFunctionCall(functionCall, state) {
   const fcName = state.toolNameMap?.get(rawName) || rawName;
   const fcArgs = functionCall.args || {};
   const toolCallIndex = state.functionIndex++;
+  // Prefer the upstream-provided call id (Gemini 3 sends one) — it round-trips to
+  // functionResponse without name reconstruction. Fall back to a generated id.
+  // Anthropic tool_use ids must match [a-zA-Z0-9_-], so sanitize either way.
+  if (!state.seenToolCallIds) state.seenToolCallIds = new Set();
+  const upstreamId = functionCall.id;
+  const rawId = upstreamId && !state.seenToolCallIds.has(upstreamId)
+    ? upstreamId
+    : `${fcName}_${Date.now()}_${toolCallIndex}`;
+  const id = rawId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  state.seenToolCallIds.add(id);
+  if (upstreamId) state.seenToolCallIds.add(upstreamId);
   const toolCall = {
-    id: `${fcName}-${Date.now()}-${toolCallIndex}`,
+    id,
     index: toolCallIndex,
     type: OPENAI_BLOCK.FUNCTION,
     function: { name: fcName, arguments: JSON.stringify(fcArgs) },
@@ -35,14 +46,24 @@ function emitFunctionCall(functionCall, state) {
 // Convert Gemini response chunk to OpenAI format
 export function geminiToOpenAIResponse(chunk, state) {
   if (!chunk) return null;
-  
+
   // Handle Antigravity wrapper
   const response = chunk.response || chunk;
-  if (!response || !response.candidates?.[0]) return null;
+  if (!response) return null;
 
   const results = [];
-  const candidate = response.candidates[0];
-  const content = candidate.content;
+  const candidate = response.candidates?.[0];
+  const upstreamError = response.error || chunk.error;
+  const blockReason = response.promptFeedback?.blockReason;
+
+  // Candidate-less chunk with nothing to surface: harvest usage from keep-alive
+  // chunks (usageMetadata-only) and skip. Dropping error/blockReason chunks here
+  // used to leave the client with an empty 200 stream that never closes.
+  if (!candidate && !upstreamError && !blockReason) {
+    const keepAliveUsage = toOpenAIUsage(response.usageMetadata || chunk.usageMetadata, "gemini");
+    if (keepAliveUsage) state.usage = keepAliveUsage;
+    return null;
+  }
 
   // Initialize state
   if (!state.messageId) {
@@ -53,17 +74,39 @@ export function geminiToOpenAIResponse(chunk, state) {
     results.push(buildChunk(chunkMeta(state), { role: ROLE.ASSISTANT }, null));
   }
 
+  // Error object embedded mid-stream in a 200 response (e.g. RESOURCE_EXHAUSTED):
+  // close the message with an error finish so downstream surfaces it instead of hanging.
+  if (!candidate && upstreamError) {
+    state.upstreamError = upstreamError;
+    const errorChunk = buildChunk(chunkMeta(state), {}, OPENAI_FINISH.ERROR);
+    if (state.usage) errorChunk.usage = state.usage;
+    results.push(errorChunk);
+    state.finishReason = OPENAI_FINISH.ERROR;
+    return results;
+  }
+
+  // Prompt blocked before any candidate was produced: close as content_filter.
+  if (!candidate && blockReason) {
+    const blockedChunk = buildChunk(chunkMeta(state), {}, OPENAI_FINISH.CONTENT_FILTER);
+    if (state.usage) blockedChunk.usage = state.usage;
+    results.push(blockedChunk);
+    state.finishReason = OPENAI_FINISH.CONTENT_FILTER;
+    return results;
+  }
+
+  const content = candidate.content;
+
   // Process parts
   if (content?.parts) {
     for (const part of content.parts) {
       const hasThoughtSig = part.thoughtSignature || part.thought_signature;
       const isThought = part.thought === true;
-      
+
       // Handle thought signature (thinking mode)
       if (hasThoughtSig) {
         const hasTextContent = part.text !== undefined && part.text !== "";
         const hasFunctionCall = !!part.functionCall;
-        
+
         if (hasTextContent) {
           results.push(buildChunk(
             chunkMeta(state),
@@ -71,7 +114,7 @@ export function geminiToOpenAIResponse(chunk, state) {
             null
           ));
         }
-        
+
         if (hasFunctionCall) {
           results.push(emitFunctionCall(part.functionCall, state));
         }
@@ -121,17 +164,19 @@ export function geminiToOpenAIResponse(chunk, state) {
   // Finish reason - include usage in final chunk
   if (candidate.finishReason) {
     let finishReason = toOpenAIFinish(candidate.finishReason, "gemini");
+    // An aborted/error finish must NOT upgrade to tool_calls even if a functionCall
+    // was emitted earlier — that would re-execute the aborted tool call.
     if (finishReason === OPENAI_FINISH.STOP && state.geminiToolCallCount > 0) {
       finishReason = OPENAI_FINISH.TOOL_CALLS;
     }
-    
+
     const finalChunk = buildChunk(chunkMeta(state), {}, finishReason);
-    
+
     // Include usage in final chunk for downstream translators
     if (state.usage) {
       finalChunk.usage = state.usage;
     }
-    
+
     results.push(finalChunk);
     state.finishReason = finishReason;
   }
@@ -144,4 +189,3 @@ register(FORMATS.GEMINI, FORMATS.OPENAI, null, geminiToOpenAIResponse);
 register(FORMATS.GEMINI_CLI, FORMATS.OPENAI, null, geminiToOpenAIResponse);
 register(FORMATS.ANTIGRAVITY, FORMATS.OPENAI, null, geminiToOpenAIResponse);
 register(FORMATS.VERTEX, FORMATS.OPENAI, null, geminiToOpenAIResponse);
-

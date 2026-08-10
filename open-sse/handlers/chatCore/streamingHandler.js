@@ -113,7 +113,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
-  const onStreamComplete = (contentObj, usage, ttftAt) => {
+  const onStreamComplete = (contentObj, usage, ttftAt, meta) => {
     const latency = {
       ttft: ttftAt ? ttftAt - requestStartTime : Date.now() - requestStartTime,
       total: Date.now() - requestStartTime
@@ -121,16 +121,32 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;
 
+    // Truthful status: an exhausted empty stream (no content + embedded error
+    // or "error" finish from the empty-stream guard) is a failed attempt, not a
+    // healthy completion. Mark it "error" so the request-detail panel renders
+    // the real cause instead of a misleading ordinary assistant turn.
+    const isExhausted = meta?.empty && (meta?.upstreamError || meta?.finishReason === "error");
+    const status = isExhausted ? "error" : "success";
+    const reportedContent = isExhausted
+      ? `[Empty streaming response] upstream=${meta?.upstreamError?.status || meta?.finishReason || "EMPTY_RESPONSE"}`
+      : safeContent;
+
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency,
       tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: finalBody || translatedBody || null,
-      providerResponse: safeContent,
-      response: { content: safeContent, thinking: safeThinking, type: "streaming" },
+      providerResponse: reportedContent,
+      response: {
+        content: reportedContent,
+        thinking: safeThinking,
+        type: "streaming",
+        finishReason: meta?.finishReason,
+        upstreamError: meta?.upstreamError,
+      },
       pxpipe,
-      status: "success"
+      status
     }, { id: streamDetailId })).catch(err => {
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });

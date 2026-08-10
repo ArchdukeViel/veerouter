@@ -295,6 +295,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
+      },
+      // Antigravity empty-stream guard: when every in-stream retry came back
+      // empty (the literal [Empty streaming response] case), bench the account
+      // so the client's automatic retry rotates to the next one. resetsAtMs
+      // comes from the upstream quota-reset parser when available, so the
+      // cooldown is precise instead of the generic exponential backoff.
+      onUpstreamEmptyExhausted: async (reason, resetsAtMs) => {
+        await markAccountUnavailable(credentials.connectionId, HTTP_STATUS.BAD_GATEWAY, reason, provider, model, resetsAtMs);
       }
     });
 

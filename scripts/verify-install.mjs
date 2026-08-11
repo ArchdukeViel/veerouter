@@ -101,10 +101,10 @@ if (cliMode) {
     : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName)]
   ).find((candidate) => candidate && fs.existsSync(candidate));
   const globalPackageEntry = globalRoot && path.join(globalRoot, cliPackage.name, "cli.js");
-  const invocation = globalCommandPath
-    ? { command: globalCommandPath, args: ["--version"], shell: process.platform === "win32" }
-    : globalPackageEntry && fs.existsSync(globalPackageEntry)
-      ? { command: process.execPath, args: [globalPackageEntry, "--version"], shell: false }
+  const invocation = globalPackageEntry && fs.existsSync(globalPackageEntry)
+    ? { command: process.execPath, args: [globalPackageEntry, "--version"], shell: false }
+    : globalCommandPath
+      ? { command: globalCommandPath, args: ["--version"], shell: process.platform === "win32" }
       : { command: commandName, args: ["--version"], shell: process.platform === "win32" };
   const result = spawnSync(invocation.command, invocation.args, {
     cwd: rootDir,

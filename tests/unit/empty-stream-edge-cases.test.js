@@ -68,6 +68,7 @@ describe("empty-stream edge cases (Bug 1 + 2 follow-ups)", () => {
     const out = await drain(stream);
     expect(out).toContain("recovered");
     expect(reexecute).toHaveBeenCalledTimes(2);
+    expect(1 + reexecute.mock.calls.length).toBe(3); // initial null + two reexecs
     expect(state).toEqual({ meaningful: true, exhausted: false });
   });
 

@@ -17,7 +17,7 @@ import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
 import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
 import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
-import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/streamingHandler.js";
+import { handleStreamingResponse, buildOnStreamComplete, validateSseContentType } from "./chatCore/streamingHandler.js";
 import { createEmptyRetryStream } from "./chatCore/emptyStreamGuard.js";
 import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
 import { dedupeTools } from "../utils/toolDeduper.js";
@@ -58,7 +58,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, onAccountExhausted, chatCoreCtx, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, onAccountExhausted, onStaleProject, chatCoreCtx, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -408,6 +408,23 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Provider returned error
+  if (!providerResponse.ok && provider === "antigravity" && providerResponse.status === 404 && onStaleProject && credentials?.projectId) {
+    try {
+      const repaired = await onStaleProject({ credentials, connectionId, model });
+      if (repaired) {
+        const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
+        providerResponse = retryResult.response;
+        providerUrl = retryResult.url;
+        providerHeaders = retryResult.headers;
+        finalBody = retryResult.transformedBody || finalBody;
+        providerResponseFormat = retryResult.responseFormat || targetFormat;
+        reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+      }
+    } catch (error) {
+      log?.warn?.("PROJECT", `${provider.toUpperCase()} | projectId repair retry failed: ${error?.message || error}`);
+    }
+  }
+
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
@@ -439,6 +456,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // in-stream error event (retryable by Claude Code); onUpstreamEmptyExhausted
   // lets the caller bench the account so the client's retry rotates to the next
   // one (#2188, #2229, #2250, #2259, #2431).
+  // Validate the wire format before any provider-specific retry wrapper can
+  // inspect the body. A 200 text/html error page is a terminal upstream
+  // response, not an empty SSE attempt to replay.
+  if (stream) {
+    const nonSse = await validateSseContentType({ providerResponse, provider, model, streamController, reqTag, log });
+    if (nonSse) return { success: false, status: nonSse.status, error: nonSse.message, response: nonSse.response };
+  }
+
   let emptyGuardState = null;
   if (provider === "antigravity" && stream) {
     emptyGuardState = { meaningful: false, exhausted: false };
@@ -458,6 +483,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         signal: streamController.signal,
         log,
         provider,
+        authType: credentials?.authType,
         state: emptyGuardState,
         connectionId,
         onAccountExhausted: onAccountExhausted ? async ({ reason, upstreamError, currentConnectionId }) => {

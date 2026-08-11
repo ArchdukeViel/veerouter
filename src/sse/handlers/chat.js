@@ -21,9 +21,10 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
-import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { getProjectIdForConnection, invalidateProjectId } from "open-sse/services/projectId.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { classifyFailure, classifyThrownError, isRetryableStatus } from "open-sse/utils/failureClassifier.js";
+import { executeWithStaleProjectRepair, repairStaleProjectId } from "open-sse/utils/projectRepair.js";
 import { getRequestId, handleUnhandledRequestError } from "../utils/unhandledError.js";
 
 /**
@@ -479,14 +480,23 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       //    guard calls this on every retry after rotation; using live activeAccount
       //    fields ensures later rotation hops stay consistent.
       const rotatedReexecute = async () => {
-        const retryResult = await getExecutor(provider).execute({
-          model,
-          body: chatCoreCtx.translatedBody,
-          stream: true,
+        const retryResult = await executeWithStaleProjectRepair({
+          provider,
           credentials: nextRefreshed,
-          signal: chatCoreCtx.streamControllerSignal,
+          connectionId: nextId,
+          execute: () => getExecutor(provider).execute({
+            model,
+            body: chatCoreCtx.translatedBody,
+            stream: true,
+            credentials: nextRefreshed,
+            signal: chatCoreCtx.streamControllerSignal,
+            log,
+            proxyOptions: nextProxyOptions,
+          }),
+          invalidateProjectId,
+          resolveProjectId: getProjectIdForConnection,
+          persistProjectId: updateProviderCredentials,
           log,
-          proxyOptions: nextProxyOptions,
         });
         if (!retryResult.response.ok) {
           const status = retryResult.response.status;
@@ -549,6 +559,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       // THIS object so success clearing targets whichever account actually
       // emitted the bytes, not the originally selected one.
       chatCoreCtx,
+      onStaleProject: async () => repairStaleProjectId({
+        provider,
+        credentials: activeAccount.credentials,
+        connectionId: activeAccount.connectionId,
+        invalidateProjectId,
+        resolveProjectId: getProjectIdForConnection,
+        persistProjectId: updateProviderCredentials,
+        log,
+      }),
       onCredentialsRefreshed: async (newCreds) => {
         // Persist refreshed token to DB using the LIVE connectionId. The
         // chatCore already mutates the same credentials object passed in, so

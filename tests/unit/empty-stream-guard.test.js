@@ -127,11 +127,22 @@ describe("createEmptyRetryStream", () => {
   it("exhaustion re-emits a held real upstream error instead of the synthetic one", async () => {
     const quota = wrap({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Quota exceeded" } });
     const { out, retries } = await runWrapper([[quota], [quota], [quota]]);
-    expect(retries).toBe(2);
+    expect(retries).toBe(0); // classifier rotates quota errors immediately
     const events = dataEvents(out);
     expect(events).toHaveLength(1); // held errors of earlier attempts never forwarded
     expect(events[0].response.error.status).toBe("RESOURCE_EXHAUSTED");
     expect(events[0].response.error.message).toBe("Quota exceeded");
+  });
+
+  it("HTTP-200 INVALID_ARGUMENT is terminal and never rotates", async () => {
+    const invalidArgument = wrap({
+      error: { code: 400, status: "INVALID_ARGUMENT", message: "schema mismatch" },
+    });
+    const onExhausted = vi.fn();
+    const { out, retries } = await runWrapper([[invalidArgument]], { onExhausted });
+    expect(out).toBe(sseText([invalidArgument]));
+    expect(retries).toBe(0);
+    expect(onExhausted).not.toHaveBeenCalled();
   });
 
   it("MALFORMED_FUNCTION_CALL before content is withheld and retried", async () => {

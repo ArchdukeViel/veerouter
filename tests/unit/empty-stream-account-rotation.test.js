@@ -162,6 +162,32 @@ describe("empty-stream guard: corrected server-side account rotation state machi
     expect(selected).toEqual(["acc-B", "acc-C"]);
   });
 
+  it.each([408, 409])("HTTP %s consumes same-account retry budget before rotation", async (status) => {
+    const reexecute = vi.fn(async () => {
+      const error = new Error(`[${status}] transient upstream failure`);
+      error.status = status;
+      throw error;
+    });
+    const onAccountExhausted = vi.fn(async () => ({
+      connectionId: "acc-B",
+      reexecute: async () => sseBody([text("B recovered"), finish("STOP")]),
+    }));
+
+    const stream = createEmptyRetryStream({
+      body: sseBody([bareStop()]),
+      reexecute,
+      log: null,
+      baseDelayMs: 1,
+      connectionId: "acc-A",
+      onAccountExhausted,
+    });
+
+    const out = await drain(stream);
+    expect(out).toContain("B recovered");
+    expect(reexecute).toHaveBeenCalledTimes(2);
+    expect(onAccountExhausted).toHaveBeenCalledWith(expect.objectContaining({ currentConnectionId: "acc-A" }));
+  });
+
   it("All accounts exhaust → final error event emitted to client", async () => {
     const benched = [];
     const onAccountExhausted = vi.fn(async ({ currentConnectionId }) => {

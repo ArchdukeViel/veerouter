@@ -64,8 +64,46 @@ const DETERMINISTIC_MESSAGE_HINTS = [
   "bad request", "[400]", "unauthorized", "[401]", "forbidden", "[403]",
   "not found", "[404]", "method not allowed", "not acceptable",
   "payload too large", "uri too long", "schema", "validation",
-  "invalid api key", "malformed", "improperly formed", "not allowed",
+  "invalid api key", "invalid argument", "invalid_argument", "malformed",
+  "improperly formed", "not allowed",
 ];
+
+// Gemini/Google APIs commonly put a symbolic gRPC status in an embedded
+// `{error:{...}}` object instead of returning an HTTP error. Normalize both
+// symbolic and gRPC numeric codes so the same policy applies to those events.
+const EMBEDDED_STATUS_CODES = Object.freeze({
+  INVALID_ARGUMENT: 400,
+  BAD_REQUEST: 400,
+  FAILED_PRECONDITION: 400,
+  OUT_OF_RANGE: 400,
+  UNAUTHENTICATED: 401,
+  PERMISSION_DENIED: 403,
+  NOT_FOUND: 404,
+  ALREADY_EXISTS: 409,
+  ABORTED: 409,
+  DEADLINE_EXCEEDED: 408,
+  RESOURCE_EXHAUSTED: 429,
+  UNIMPLEMENTED: 501,
+  UNAVAILABLE: 503,
+  INTERNAL: 500,
+  DATA_LOSS: 500,
+});
+
+const EMBEDDED_GRPC_STATUS_CODES = Object.freeze({
+  1: 499,
+  3: 400,
+  4: 408,
+  5: 404,
+  6: 409,
+  7: 403,
+  8: 429,
+  10: 409,
+  12: 501,
+  13: 500,
+  14: 503,
+  15: 500,
+  16: 401,
+});
 
 function parseStatusFromMessage(message) {
   if (typeof message !== "string") return null;
@@ -176,4 +214,38 @@ export function classifyThrownError(error, { provider, authType, signal } = {}) 
     ? error.status
     : parseStatusFromMessage(error?.message);
   return classifyFailure({ status, error, message: error?.message, provider, authType, signal });
+}
+
+/**
+ * Classify a provider error embedded in an otherwise successful HTTP/SSE
+ * response. Gemini frequently uses symbolic gRPC statuses here, so normalize
+ * those before applying the central HTTP/account policy.
+ */
+export function classifyEmbeddedError(errorObject, { provider, authType, signal } = {}) {
+  const status = normalizeEmbeddedStatus(errorObject);
+  const message = [errorObject?.status, errorObject?.message]
+    .filter((value) => value !== undefined && value !== null && String(value).trim())
+    .map(String)
+    .join(": ");
+  return classifyFailure({ status, error: errorObject, message, provider, authType, signal });
+}
+
+function normalizeEmbeddedStatus(errorObject) {
+  const code = errorObject?.code;
+  const numericCode = Number(code);
+  if (Number.isFinite(numericCode)) {
+    if (numericCode >= 100 && numericCode <= 599) return numericCode;
+    if (Object.hasOwn(EMBEDDED_GRPC_STATUS_CODES, numericCode)) return EMBEDDED_GRPC_STATUS_CODES[numericCode];
+  }
+
+  const symbolic = [errorObject?.status, errorObject?.code]
+    .find((value) => typeof value === "string" && value.trim());
+  if (symbolic) {
+    const normalized = symbolic.trim().toUpperCase();
+    if (Object.hasOwn(EMBEDDED_STATUS_CODES, normalized)) return EMBEDDED_STATUS_CODES[normalized];
+    const parsed = parseStatusFromMessage(normalized);
+    if (parsed !== null) return parsed;
+  }
+
+  return null;
 }

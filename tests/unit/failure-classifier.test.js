@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFailure,
+  classifyEmbeddedError,
   classifyThrownError,
   FAILURE_KIND,
   isRetryableStatus,
@@ -56,6 +57,14 @@ describe("central upstream failure classifier", () => {
       status: 429,
       code: "RATE_LIMITED",
     });
+  });
+
+  it.each([
+    [{ code: 400, status: "INVALID_ARGUMENT", message: "schema mismatch" }, "openai", FAILURE_KIND.DETERMINISTIC],
+    [{ code: 429, status: "RESOURCE_EXHAUSTED", message: "quota exceeded" }, "antigravity", FAILURE_KIND.ROTATE_ACCOUNT],
+    [{ status: "INTERNAL", message: "provider failed" }, "antigravity", FAILURE_KIND.ROTATE_ACCOUNT],
+  ])("classifies embedded %s from %s as %s", (errorObject, provider, kind) => {
+    expect(classifyEmbeddedError(errorObject, { provider }).kind).toBe(kind);
   });
 
   it("keeps the legacy status predicate behavior", () => {

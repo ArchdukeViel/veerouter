@@ -18,7 +18,7 @@
 // finish, which Anthropic clients treat as retryable.
 import { GEMINI_FINISH, GEMINI_ERROR_FINISH_REASONS, GEMINI_CONTENT_FILTER_FINISH_REASONS } from "../../translator/schema/finishReasons.js";
 import { STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
-import { classifyThrownError, FAILURE_KIND, isRetryableStatus } from "../../utils/failureClassifier.js";
+import { classifyEmbeddedError, classifyThrownError, FAILURE_KIND, isRetryableStatus } from "../../utils/failureClassifier.js";
 
 // Mirrors oh-my-pi's empty-response policy: 2 retries, 500ms * 2^attempt backoff.
 export const EMPTY_STREAM_MAX_RETRIES = 2;
@@ -48,7 +48,7 @@ export function isMeaningfulPart(part) {
 //   terminal so the attempt is never retried)
 // - hold: withhold it — it is the terminal of an empty attempt; the message
 //   must stay open so the retried attempt can splice in.
-function classifyEvent(parsed, meaningfulSeen) {
+function classifyEvent(parsed, meaningfulSeen, { provider, authType, signal } = {}) {
   // Antigravity wrapper
   const response = parsed.response || parsed;
   if (!response || typeof response !== "object") return { action: "forward" };
@@ -57,9 +57,20 @@ function classifyEvent(parsed, meaningfulSeen) {
   if (errorObj) {
     // Embedded error object in a 200 stream. After content: forward — the
     // translator closes the message with the error finish. Before content:
-    // withhold and retry (usually transient, e.g. RESOURCE_EXHAUSTED blips).
+    // deterministic errors forward immediately; retryable errors are held so
+    // the central classifier can choose same-account retry or rotation.
+    const classification = classifyEmbeddedError(errorObj, { provider, authType, signal });
     if (meaningfulSeen) return { action: "forward", terminal: true };
-    return { action: "hold", kind: "error_object", reason: errorObj.status || errorObj.message || "error", error: errorObj };
+    if (classification.kind === FAILURE_KIND.DETERMINISTIC || classification.kind === FAILURE_KIND.TERMINAL || classification.kind === FAILURE_KIND.ABORT) {
+      return { action: "forward", terminal: true };
+    }
+    return {
+      action: "hold",
+      kind: "error_object",
+      reason: errorObj.status || errorObj.message || "error",
+      error: errorObj,
+      failureKind: classification.kind,
+    };
   }
 
   // Prompt blocked by policy: deterministic for this prompt — never retried.
@@ -122,7 +133,7 @@ function classifyEvent(parsed, meaningfulSeen) {
  *   Benches current account, excludes it, and returns the next account's reexecute factory.
  * @returns {ReadableStream} byte stream for the SSE transform pipeline
  */
-export function createEmptyRetryStream({ body, reexecute, signal, log, provider, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, baseDelayMs = EMPTY_STREAM_BASE_DELAY_MS, connectionId = "", onExhausted, onAccountExhausted, state = null }) {
+export function createEmptyRetryStream({ body, reexecute, signal, log, provider, authType, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, baseDelayMs = EMPTY_STREAM_BASE_DELAY_MS, connectionId = "", onExhausted, onAccountExhausted, state = null }) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   let currentReader = null;
@@ -150,7 +161,10 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
       // Attempt 0 is the caller-provided body (that upstream request is ALREADY
       // issued — the guard only reads it). Consumed once: a rotated account's
       // first attempt must go through reexecute, never re-read this older body.
-      let firstAttemptPending = body != null;
+      // A null body is still the already-issued initial 200 attempt, represented
+      // by the synthetic empty reader above. It must not become an extra
+      // upstream request before the bounded reexecute budget starts.
+      let firstAttemptPending = true;
 
       const emit = (text) => {
         if (downstreamGone) return;
@@ -219,6 +233,8 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
       //   { reader }        — new attempt ready to read
       //   { exhaust: { reason, held } } — deterministic/terminal failure
       //   { rotated: true } — account rotated; caller must loop
+      // Retryable thrown failures are classified into same-account retry or
+      // account rotation; deterministic failures terminate without rotation.
       const executeAttempt = async () => {
         let attemptBody;
         try {
@@ -231,6 +247,7 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
             return { exhaust: { reason: error?.message || "retry request failed" } };
           }
           if (cls.kind === FAILURE_KIND.ABORT) return abortStream();
+          if (cls.kind === FAILURE_KIND.RETRY_SAME_ACCOUNT) return { retrySameAccount: true, cls };
           return { rotated: true, cls };
         }
         if (!attemptBody) {
@@ -316,13 +333,13 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
             return;
           }
 
-          const decision = classifyEvent(parsed, meaningfulSeen);
+          const decision = classifyEvent(parsed, meaningfulSeen, { provider, authType, signal });
           if (decision.meaningful) {
             meaningfulSeen = true;
             if (state) state.meaningful = true;
           }
           if (decision.action === "hold") {
-            held = { kind: decision.kind, reason: decision.reason, error: decision.error || null, line: `${line}\n\n` };
+            held = { kind: decision.kind, reason: decision.reason, error: decision.error || null, failureKind: decision.failureKind, line: `${line}\n\n` };
             lastHeld = held;
             return;
           }
@@ -344,6 +361,20 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
         }
         if (executed === undefined) return; // abortStream path
         if (executed.exhaust) return exhaust(executed.exhaust.reason, lastHeld);
+        if (executed.retrySameAccount) {
+          if (attempt >= EMPTY_STREAM_MAX_RETRIES) {
+            const rotated = await tryRotate({
+              reason: `same-account retries exhausted: ${executed.cls.reason || "transient upstream failure"}`,
+              upstreamError: { code: executed.cls.code ?? executed.cls.status ?? 0, status: executed.cls.reason || "retry failed" },
+            });
+            if (!rotated) return exhaust(`same-account retries exhausted: ${executed.cls.reason || "transient upstream failure"}`, lastHeld);
+            attempt = -1;
+            continue;
+          }
+          await abortAwareWait(baseDelayMs * 2 ** attempt);
+          if (signal?.aborted) return abortStream();
+          continue;
+        }
         if (executed.rotated) {
           const rotated = await tryRotate({
             reason: `retryable fetch failure: ${executed.cls.reason || "unknown"}`,
@@ -418,13 +449,13 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
               continue;
             }
 
-            const decision = classifyEvent(parsed, meaningfulSeen);
+            const decision = classifyEvent(parsed, meaningfulSeen, { provider, authType, signal });
             if (decision.meaningful) {
               meaningfulSeen = true;
               if (state) state.meaningful = true;
             }
             if (decision.action === "hold") {
-              held = { kind: decision.kind, reason: decision.reason, error: decision.error || null, line: `${line}\n\n` };
+              held = { kind: decision.kind, reason: decision.reason, error: decision.error || null, failureKind: decision.failureKind, line: `${line}\n\n` };
               lastHeld = held;
               continue;
             }
@@ -453,6 +484,17 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, provider,
 
         const reason = held ? held.reason : endReason;
         log?.warn?.("STREAM", `ANTIGRAVITY | empty (${reason}) | attempt ${attempt + 1}/${EMPTY_STREAM_MAX_RETRIES + 1} | acc=${currentConnectionId?.slice?.(0, 8) || "-"}`);
+
+        // Embedded quota/auth/server errors use the same classifier as thrown
+        // HTTP failures. Account-scoped/server failures rotate immediately;
+        // transient same-account failures continue through the bounded empty
+        // retry budget below.
+        if (held?.failureKind === FAILURE_KIND.ROTATE_ACCOUNT) {
+          const rotated = await tryRotate({ reason, upstreamError: held.error || null });
+          if (!rotated) return exhaust(reason, held);
+          attempt = -1;
+          continue;
+        }
 
         if (attempt >= EMPTY_STREAM_MAX_RETRIES) {
           const exhaustReason = `empty response from upstream (${reason}) after ${attempt + 1} attempts`;

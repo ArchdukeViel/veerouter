@@ -96,11 +96,19 @@ if (cliMode) {
   };
   const globalPrefix = readNpmValue(["config", "get", "prefix"]) || readNpmValue(["prefix", "-g"]);
   const globalRoot = readNpmValue(["root", "-g"]);
+  const nodeBinDir = path.dirname(process.execPath);
   const globalCommandPath = (process.platform === "win32"
-    ? [globalPrefix && path.join(globalPrefix, commandName)]
-    : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName)]
+    ? [globalPrefix && path.join(globalPrefix, commandName), path.join(nodeBinDir, commandName)]
+    : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName), path.join(nodeBinDir, commandName)]
   ).find((candidate) => candidate && fs.existsSync(candidate));
-  const globalPackageEntry = globalRoot && path.join(globalRoot, cliPackage.name, "cli.js");
+  const globalPackageRoots = [
+    globalRoot,
+    path.join(nodeBinDir, "node_modules"),
+    path.join(nodeBinDir, "..", "lib", "node_modules"),
+  ].filter(Boolean);
+  const globalPackageEntry = globalPackageRoots
+    .map((root) => path.join(root, cliPackage.name, "cli.js"))
+    .find((candidate) => fs.existsSync(candidate));
   const invocation = globalPackageEntry && fs.existsSync(globalPackageEntry)
     ? { command: process.execPath, args: [globalPackageEntry, "--version"], shell: false }
     : globalCommandPath

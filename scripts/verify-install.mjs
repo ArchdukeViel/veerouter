@@ -84,6 +84,10 @@ if (cliMode) {
 
   const commandName = process.platform === "win32" ? "9router.cmd" : "9router";
   const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+  const extractVersion = (output) => {
+    const matches = String(output).match(/\b\d+\.\d+\.\d+\b/g);
+    return matches?.at(-1) || null;
+  };
   const readNpmValue = (args) => {
     const result = spawnSync(npmCommand, args, {
       cwd: rootDir,
@@ -100,7 +104,17 @@ if (cliMode) {
   const npmExecPrefix = process.env.npm_execpath
     ? path.resolve(path.dirname(process.env.npm_execpath), "..", "..", "..", "..")
     : null;
-  const globalPrefixes = [globalPrefix, process.env.npm_config_prefix, npmExecPrefix, nodeBinDir]
+  const configuredPrefix = process.env.npm_config_prefix || process.env.NPM_CONFIG_PREFIX;
+  const windowsNpmBin = process.platform === "win32" && process.env.APPDATA
+    ? path.join(process.env.APPDATA, "npm")
+    : null;
+  const globalPrefixes = [
+    globalPrefix,
+    configuredPrefix,
+    npmExecPrefix,
+    nodeBinDir,
+    windowsNpmBin,
+  ]
     .filter(Boolean)
     .filter((candidate, index, all) => all.indexOf(candidate) === index);
   const globalCommandPath = (process.platform === "win32"
@@ -117,24 +131,52 @@ if (cliMode) {
   const globalPackageEntry = globalPackageRoots
     .map((root) => path.join(root, cliPackage.name, "cli.js"))
     .find((candidate) => fs.existsSync(candidate));
-  const invocation = globalPackageEntry && fs.existsSync(globalPackageEntry)
-    ? { command: process.execPath, args: [globalPackageEntry, "--version"], shell: false }
-    : globalCommandPath
-      ? { command: globalCommandPath, args: ["--version"], shell: process.platform === "win32" }
-      : { command: commandName, args: ["--version"], shell: process.platform === "win32" };
-  const result = spawnSync(invocation.command, invocation.args, {
-    cwd: rootDir,
-    encoding: "utf8",
-    shell: invocation.shell,
-    windowsHide: true,
+  const invocations = [];
+  if (globalPackageEntry) {
+    invocations.push({
+      command: process.execPath,
+      args: [globalPackageEntry, "--version"],
+      shell: false,
+      label: globalPackageEntry,
+    });
+  }
+  if (globalCommandPath) {
+    invocations.push({
+      command: globalCommandPath,
+      args: ["--version"],
+      shell: process.platform === "win32",
+      label: globalCommandPath,
+    });
+  }
+  // npm knows its own global package layout even when the shim directory is
+  // not exported in PATH and npm's prefix output is not directly usable.
+  invocations.push({
+    command: npmCommand,
+    args: ["exec", "--global", "--offline", "--", cliPackage.name, "--version"],
+    shell: process.platform === "win32",
+    label: "npm exec --global",
   });
-  const version = `${result.stdout || ""}${result.stderr || ""}`.trim();
-  if (result.status !== 0) {
-    errors.push(`global ${commandName} --version failed (${invocation.command}): ${version || "no output"}`);
-  } else if (version !== cliPackage.version) {
-    errors.push(`global CLI version ${version} does not match local ${cliPackage.version}`);
-  } else {
-    report("global CLI", `${version} ready`);
+
+  const failures = [];
+  let verified = false;
+  for (const invocation of invocations) {
+    const result = spawnSync(invocation.command, invocation.args, {
+      cwd: rootDir,
+      encoding: "utf8",
+      shell: invocation.shell,
+      windowsHide: true,
+    });
+    const output = `${result.stdout || ""}${result.stderr || ""}`.trim();
+    const version = extractVersion(output);
+    if (result.status === 0 && version === cliPackage.version) {
+      report("global CLI", `${version} ready`);
+      verified = true;
+      break;
+    }
+    failures.push(`${invocation.label}: ${output || result.error?.message || "no output"}`);
+  }
+  if (!verified) {
+    errors.push(`global ${commandName} --version failed: ${failures.join(" | ") || "no invocation available"}`);
   }
 }
 

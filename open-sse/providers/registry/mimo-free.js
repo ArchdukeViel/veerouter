@@ -1,6 +1,6 @@
 // Xiaomi ended the free MiMo channel ("MiMo free API service has ended").
 // Hidden until/unless a replacement (OAuth MiMo Platform) is wired.
-export default {
+const defaultExport = {
   id: "mimo-free",
   hidden: true,
   priority: 50,
@@ -25,3 +25,4 @@ export default {
   modelsFetcher: { url: "https://models.dev/api.json", type: "mimo-free" },
   passthroughModels: true,
 };
+export default defaultExport;

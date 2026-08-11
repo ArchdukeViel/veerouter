@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "blackbox",
   priority: 50,
   alias: "blackbox",
@@ -39,3 +39,4 @@ export default {
     { id: "grok-4.3",          name: "Grok 4.3",          upstreamModelId: "blackboxai/x-ai/grok-4.3" },
   ],
 };
+export default defaultExport;

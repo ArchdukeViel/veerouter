@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "devin-cli",
   alias: "dv",
   aliases: ["devin"],
@@ -61,3 +61,4 @@ export default {
     { id: "glm-5.1", name: "GLM-5.1", contextLength: 204800 },
   ],
 };
+export default defaultExport;

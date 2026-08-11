@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "comfyui",
   priority: 120,
   alias: "comfyui",
@@ -18,3 +18,4 @@ export default {
   serviceKinds: ["image"],
   imageConfig: { baseUrl: "http://localhost:8188" },
 };
+export default defaultExport;

@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "baidu",
   alias: "qianfan",
   aliases: ["qianfan", "ernie", "baidu-qianfan"],
@@ -31,3 +31,4 @@ export default {
     { id: "qwen3.5-27b", name: "Qwen 3.5 27B", contextLength: 262144 },
   ],
 };
+export default defaultExport;

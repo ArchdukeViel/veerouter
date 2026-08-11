@@ -1,6 +1,6 @@
 // Model Studio Intl — standard DashScope API keys (sk-...), NOT Coding Plan keys.
 // Sibling of alicode-intl (Coding Plan). Two key types use two different hosts.
-export default {
+const defaultExport = {
   id: "alims-intl",
   priority: 11,
   alias: "alims-intl",
@@ -30,3 +30,4 @@ export default {
     { id: "glm-4.7", name: "GLM 4.7" },
   ],
 };
+export default defaultExport;

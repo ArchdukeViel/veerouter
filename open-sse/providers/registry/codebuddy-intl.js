@@ -1,7 +1,7 @@
 // CodeBuddy international (codebuddy.ai) — mirrors codebuddy-cn registry shape,
 // swapping the Tencent CN domain for the .ai endpoint set. All OAuth/plugin URLs
 // use the /v2/plugin prefix with platform=ide (CN uses platform=CLI).
-export default {
+const defaultExport = {
   id: "codebuddy-intl",
   alias: "cbai",
   uiAlias: "cbai",
@@ -75,3 +75,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "byteplus",
   priority: 70,
   alias: "byteplus",
@@ -33,3 +33,4 @@ export default {
   ],
   serviceKinds: ["llm"],
 };
+export default defaultExport;

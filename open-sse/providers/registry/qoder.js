@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "qoder",
   priority: 30,
   alias: "qd",
@@ -56,3 +56,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

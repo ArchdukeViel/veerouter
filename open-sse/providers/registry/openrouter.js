@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "openrouter",
   priority: 10,
   hasFree: true,
@@ -60,3 +60,4 @@ export default {
   modelsFetcher: { url: "https://openrouter.ai/api/v1/models", type: "openrouter-free" },
   passthroughModels: true,
 };
+export default defaultExport;

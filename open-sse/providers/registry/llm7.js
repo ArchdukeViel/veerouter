@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "llm7",
   alias: "llm7",
   aliases: [
@@ -33,3 +33,4 @@ export default {
   ],
   passthroughModels: true,
 };
+export default defaultExport;

@@ -33,7 +33,7 @@ export class MissingBaseUrlError extends Error {
   }
 }
 
-export default {
+const defaultExport = {
   ...baseAdapter,
   buildUrl: (_model, creds) => {
     const rawBaseUrl = creds?.providerSpecificData?.baseUrl;
@@ -44,3 +44,4 @@ export default {
     return `${baseUrl}/embeddings`;
   },
 };
+export default defaultExport;

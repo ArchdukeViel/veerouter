@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "tencent",
   alias: "hunyuan",
   aliases: ["hunyuan", "tencent-hunyuan"],
@@ -25,3 +25,4 @@ export default {
     { id: "hunyuan-t1-latest", name: "Hunyuan T1 Latest", contextLength: 256000 },
   ],
 };
+export default defaultExport;

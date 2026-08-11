@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "playht",
   alias: "playht",
   display: {
@@ -34,3 +34,4 @@ export default {
   },
   hidden: true
 };
+export default defaultExport;

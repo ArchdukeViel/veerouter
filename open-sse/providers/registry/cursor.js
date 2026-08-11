@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "cursor",
   priority: 50,
   alias: "cu",
@@ -56,3 +56,4 @@ export default {
     },
   },
 };
+export default defaultExport;

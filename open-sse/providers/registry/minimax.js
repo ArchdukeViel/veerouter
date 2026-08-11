@@ -1,6 +1,6 @@
 import { CLAUDE_API_HEADERS } from "../shared.js";
 
-export default {
+const defaultExport = {
   id: "minimax",
   priority: 90,
   alias: "minimax",
@@ -81,3 +81,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

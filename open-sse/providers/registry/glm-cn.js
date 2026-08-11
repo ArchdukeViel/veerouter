@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "glm-cn",
   priority: 130,
   alias: "glm-cn",
@@ -33,3 +33,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

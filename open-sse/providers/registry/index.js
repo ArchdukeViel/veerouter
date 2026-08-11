@@ -120,7 +120,7 @@ import p117 from "./selfhosted-stt.js";
 import p118 from "./selfhosted-tts.js";
 import p119 from "./selfhosted-embedding.js";
 
-export default [
+const defaultExport = [
   p0,
   p1,
   p2,
@@ -240,3 +240,4 @@ export default [
   p118,
   p119,
 ];
+export default defaultExport;

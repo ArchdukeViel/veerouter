@@ -1,6 +1,6 @@
 import { CLAUDE_API_HEADERS } from "../shared.js";
 
-export default {
+const defaultExport = {
   id: "deepseek",
   priority: 110,
   alias: "deepseek",
@@ -53,3 +53,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

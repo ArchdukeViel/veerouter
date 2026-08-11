@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "sambanova",
   alias: "samba",
   aliases: ["sambanova-ai"],
@@ -25,3 +25,4 @@ export default {
     { id: "MiniMax-M2.7", name: "MiniMax M2.7", contextLength: 196608 },
   ],
 };
+export default defaultExport;

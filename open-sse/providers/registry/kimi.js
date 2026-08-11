@@ -3,7 +3,7 @@ import { CLAUDE_API_HEADERS } from "../shared.js";
 // Dual auth (same pattern as xai): OAuth = Kimi Code subscription (device code),
 // API key = platform.moonshot / api.kimi.com. Transport is shared.
 // CLIProxyAPI parity: client_id, auth.kimi.com device+token, X-Msh-* headers, device_id.
-export default {
+const defaultExport = {
   id: "kimi",
   priority: 170,
   alias: "kimi",
@@ -90,3 +90,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

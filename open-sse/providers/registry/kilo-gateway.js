@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "kilo-gateway",
   alias: "kgw",
   aliases: [
@@ -32,3 +32,4 @@ export default {
     { id: "kilo-auto/balanced", name: "Kilo Auto Balanced", contextLength: 1000000 },
   ],
 };
+export default defaultExport;

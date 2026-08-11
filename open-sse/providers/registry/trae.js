@@ -3,7 +3,7 @@
 //   POST {base}/chat_sessions → {data:{chat_session_id, message_id}}
 //   GET  {base}/chat_sessions/{id}/events?reply_to_message_id=... → SSE
 //   Auth: Authorization: Cloud-IDE-JWT <jwt>
-export default {
+const defaultExport = {
   id: "trae",
   alias: "tr",
   uiAlias: "tr",
@@ -74,3 +74,4 @@ export default {
   ],
   features: { usage: true },
 };
+export default defaultExport;

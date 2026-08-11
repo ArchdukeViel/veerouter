@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "morph",
   alias: "morph",
   aliases: ["morphllm"],
@@ -27,3 +27,4 @@ export default {
     { id: "morph-dsv4flash", name: "DeepSeek V4 Flash (Morph)", contextLength: 1048576 },
   ],
 };
+export default defaultExport;

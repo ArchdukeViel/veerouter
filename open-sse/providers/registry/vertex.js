@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "vertex",
   priority: 40,
   alias: "vertex",
@@ -30,3 +30,4 @@ export default {
   ],
   serviceKinds: ["llm","imageToText"],
 };
+export default defaultExport;

@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "venice",
   priority: 115,
   alias: "venice",
@@ -54,3 +54,4 @@ export default {
   modelsFetcher: { url: "https://api.venice.ai/api/v1/models", type: "openai" },
   passthroughModels: true,
 };
+export default defaultExport;

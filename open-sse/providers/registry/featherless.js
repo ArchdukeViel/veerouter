@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "featherless",
   priority: 65,
   alias: "featherless",
@@ -32,3 +32,4 @@ export default {
     { id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5" },
   ],
 };
+export default defaultExport;

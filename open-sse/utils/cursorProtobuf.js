@@ -1068,7 +1068,7 @@ export function extractTextFromResponse(payload) {
 
 // ==================== EXPORTS ====================
 
-export default {
+const defaultExport = {
   encodeVarint,
   encodeField,
   encodeAgentValue,
@@ -1089,3 +1089,4 @@ export default {
   parseConnectRPCFrame,
   extractTextFromResponse
 };
+export default defaultExport;

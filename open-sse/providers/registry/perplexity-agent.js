@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "perplexity-agent",
   priority: 181,
   alias: "perplexity-agent",
@@ -47,3 +47,4 @@ export default {
   modelsFetcher: { url: "https://api.perplexity.ai/v1/models", type: "openai" },
   passthroughModels: true,
 };
+export default defaultExport;

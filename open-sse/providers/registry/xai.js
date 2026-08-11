@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "xai",
   priority: 280,
   alias: "xai",
@@ -45,3 +45,4 @@ export default {
     pricingUrl: "https://x.ai/api#pricing",
   },
 };
+export default defaultExport;

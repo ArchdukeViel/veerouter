@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "api-airforce",
   alias: "af",
   aliases: [
@@ -34,3 +34,4 @@ export default {
     { id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash (Free)", contextLength: 1048576 },
   ],
 };
+export default defaultExport;

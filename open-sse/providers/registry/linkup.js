@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "linkup",
   alias: "linkup",
   display: {
@@ -32,3 +32,4 @@ export default {
     cacheTTLMs: 300000
   }
 };
+export default defaultExport;

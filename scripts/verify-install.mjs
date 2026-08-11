@@ -97,14 +97,22 @@ if (cliMode) {
   const globalPrefix = readNpmValue(["config", "get", "prefix"]) || readNpmValue(["prefix", "-g"]);
   const globalRoot = readNpmValue(["root", "-g"]);
   const nodeBinDir = path.dirname(process.execPath);
+  const npmExecPrefix = process.env.npm_execpath
+    ? path.resolve(path.dirname(process.env.npm_execpath), "..", "..", "..", "..")
+    : null;
+  const globalPrefixes = [globalPrefix, process.env.npm_config_prefix, npmExecPrefix, nodeBinDir]
+    .filter(Boolean)
+    .filter((candidate, index, all) => all.indexOf(candidate) === index);
   const globalCommandPath = (process.platform === "win32"
-    ? [globalPrefix && path.join(globalPrefix, commandName), path.join(nodeBinDir, commandName)]
-    : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName), path.join(nodeBinDir, commandName)]
+    ? globalPrefixes.flatMap((prefix) => [path.join(prefix, commandName)])
+    : globalPrefixes.flatMap((prefix) => [path.join(prefix, "bin", commandName), path.join(prefix, commandName)])
   ).find((candidate) => candidate && fs.existsSync(candidate));
   const globalPackageRoots = [
     globalRoot,
-    path.join(nodeBinDir, "node_modules"),
-    path.join(nodeBinDir, "..", "lib", "node_modules"),
+    ...globalPrefixes.flatMap((prefix) => [
+      path.join(prefix, "node_modules"),
+      path.join(prefix, "lib", "node_modules"),
+    ]),
   ].filter(Boolean);
   const globalPackageEntry = globalPackageRoots
     .map((root) => path.join(root, cliPackage.name, "cli.js"))

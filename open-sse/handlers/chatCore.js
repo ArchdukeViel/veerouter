@@ -58,7 +58,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, onAccountRotate, chatCoreCtx, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -280,6 +280,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
+  // Expose post-translation body + active signal to the caller so a server-
+  // side account rotation hook can re-issue the same logical request with
+  // rotated credentials without re-running translation. Translation is
+  // provider/credentials-aware (projectId, session id), but the rotated
+  // executor's `transformRequest` re-reads credentials at execute-time, so
+  // reusing the body is safe across rotations.
+  if (chatCoreCtx) {
+    chatCoreCtx.translatedBody = translatedBody;
+    chatCoreCtx.streamControllerSignal = streamController.signal;
+  }
+
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;
   log?.debug?.("REQUEST", `${provider.toUpperCase()} | ${model} | ${msgCount} msgs`);
 
@@ -433,7 +444,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // lets the caller bench the account so the client's retry rotates to the next
   // one (#2188, #2229, #2250, #2259, #2431).
   if (provider === "antigravity" && stream && providerResponse.body) {
-    const reexecute = async () => {
+    let reexecute = async () => {
       const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
       if (!retryResult.response.ok) {
         const { statusCode, message } = await parseUpstreamError(retryResult.response, executor);
@@ -458,6 +469,20 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             resetMs ? Date.now() + resetMs : undefined
           );
         },
+        // Server-side account recovery. Returns null when no more accounts are
+        // eligible, in which case the exhaustion event surfaces to the client.
+        // Returns { reexecute } with a NEW re-execution factory bound to the
+        // next account's credentials/proxy/projectId; the empty-stream guard
+        // splices it into the same client stream transparently.
+        onAccountRotate: onAccountRotate ? async (reason, meta) => {
+          try {
+            const next = await onAccountRotate({ reason, upstreamError: meta?.upstreamError || null, translatedBody, model, stream, proxyOptions });
+            return next || null;
+          } catch (error) {
+            log?.warn?.("STREAM", `ANTIGRAVITY | onAccountRotate threw: ${error?.message || error}`);
+            return null;
+          }
+        } : undefined,
       }),
       { status: providerResponse.status, headers: providerResponse.headers }
     );

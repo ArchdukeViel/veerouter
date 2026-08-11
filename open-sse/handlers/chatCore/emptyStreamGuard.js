@@ -102,9 +102,16 @@ function classifyEvent(parsed, meaningfulSeen) {
  *   observer for "every attempt came back empty" (e.g. bench the account so
  *   client retries rotate); awaited before the error event is emitted, and
  *   handed the held upstream error object so quota reset times can be parsed
+ * @param {() => Promise<{reexecute: () => Promise<ReadableStream>, signal?: AbortSignal}|null>} [options.onAccountRotate]
+ *   server-side account recovery hook. When every same-account empty retry
+ *   fails, the guard invokes this to obtain a NEW `reexecute` factory bound to
+ *   the next eligible account; attempts then continue transparently. Only safe
+ *   while NO client-actionable output (visible text, tool call, inline data)
+ *   has been emitted yet — the empty-stream guard withholds content until
+ *   meaningful, so this condition holds by construction.
  * @returns {ReadableStream} byte stream for the SSE transform pipeline
  */
-export function createEmptyRetryStream({ body, reexecute, signal, log, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, baseDelayMs = EMPTY_STREAM_BASE_DELAY_MS, onExhausted }) {
+export function createEmptyRetryStream({ body, reexecute, signal, log, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, baseDelayMs = EMPTY_STREAM_BASE_DELAY_MS, onExhausted, onAccountRotate }) {
   const encoder = new TextEncoder();
   let currentReader = null;
   let downstreamGone = false;
@@ -147,7 +154,6 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, stallTime
         emit(line);
         closeStream();
       };
-
       for (let attempt = 0; ; attempt++) {
         const decoder = new TextDecoder();
         let lineBuffer = "";
@@ -232,6 +238,27 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, stallTime
         log?.warn?.("STREAM", `ANTIGRAVITY | empty (${reason}) | attempt ${attempt + 1}/${EMPTY_STREAM_MAX_RETRIES + 1}`);
 
         if (attempt >= EMPTY_STREAM_MAX_RETRIES) {
+          // Server-side account recovery: before surfacing exhaustion to the
+          // client, give the caller a chance to rotate to a different
+          // account and re-issue the request in-stream. Only safe because
+          // meaningfulSeen === false at this point (no visible text, no
+          // tool call, no inline data has crossed the wire).
+          if (onAccountRotate) {
+            try {
+              const next = await onAccountRotate(reason, { upstreamError: lastHeld?.error || null });
+              if (next && typeof next.reexecute === "function") {
+                if (signal?.aborted) return abortStream();
+                reexecute = next.reexecute;
+                log?.warn?.("STREAM", `ANTIGRAVITY | rotating account in-stream after ${attempt + 1} empty attempts`);
+                // Reset attempt counter for the new account and continue.
+                attempt = -1; // loop will increment to 0
+                continue;
+              }
+            } catch (error) {
+              // Rotation failure: fall through to the normal exhaustion path.
+              log?.warn?.("STREAM", `ANTIGRAVITY | account rotation failed: ${error?.message || error}`);
+            }
+          }
           return exhaust(`empty response from upstream (${reason}) after ${attempt + 1} attempts`);
         }
 

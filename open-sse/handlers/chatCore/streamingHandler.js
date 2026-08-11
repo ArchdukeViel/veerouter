@@ -44,13 +44,21 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log }) {
-  if (onRequestSuccess) {
+  // Defer the account-success callback until the stream actually produces
+  // SOMETHING — HTTP 200 with zero bytes / thought-only / empty attempts is
+  // still a failure mode for the client. Clearing the account's error state
+  // before that risks marking a quota-exhausted account healthy again from a
+  // 200-with-no-body response. See #2517 / #2520 (empty-stream guard parity).
+  let requestSuccessFired = false;
+  const fireRequestSuccess = () => {
+    if (requestSuccessFired || !onRequestSuccess) return;
+    requestSuccessFired = true;
     Promise.resolve()
       .then(onRequestSuccess)
       .catch(err => {
         console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
       });
-  }
+  };
 
   // When upstream returns HTML/text instead of SSE (e.g. Cloudflare 5xx error
   // page), piping it through the SSE transform stream causes Next.js
@@ -81,11 +89,30 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey });
 
+  // Tee the stream: fire the deferred success callback the first time a
+  // translated byte actually crosses the wire. A 200 stream that aborts or
+  // empties before emitting anything never reaches this tee and therefore
+  // never clears the account error state.
+  const successTee = new TransformStream({
+    transform(chunk, controller) {
+      fireRequestSuccess();
+      controller.enqueue(chunk);
+    },
+  });
+
   // Responses passthrough: synthesize response.failed + [DONE] if the stream aborts/stalls before a terminal event
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+  // Inject the success tee between the transform stream and the disconnect-aware
+  // wrapper. We do this by wrapping the transform's readable with a tee pipe so
+  // the callback fires on the first byte that survives the transform.
+  const teeWrappedTransform = {
+    ...transformStream,
+    get readable() { return transformStream.readable.pipeThrough(successTee); },
+    get writable() { return transformStream.writable; },
+  };
+  const transformedBody = pipeWithDisconnect(providerResponse, teeWrappedTransform, streamController, onAbortTerminal, stallTimeoutMs);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,

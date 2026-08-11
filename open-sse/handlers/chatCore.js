@@ -58,7 +58,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, onAccountExhausted, chatCoreCtx, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -280,6 +280,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
+  if (chatCoreCtx) {
+    chatCoreCtx.translatedBody = translatedBody;
+    chatCoreCtx.streamControllerSignal = streamController.signal;
+  }
+
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;
   log?.debug?.("REQUEST", `${provider.toUpperCase()} | ${model} | ${msgCount} msgs`);
 
@@ -448,10 +453,21 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         reexecute,
         signal: streamController.signal,
         log,
+        connectionId,
+        onAccountExhausted: onAccountExhausted ? async ({ reason, upstreamError, currentConnectionId }) => {
+          const resetMs = executor.parseRetryFromErrorMessage?.(upstreamError?.message || reason);
+          return onAccountExhausted({
+            reason: formatProviderError(new Error(reason), provider, model, HTTP_STATUS.BAD_GATEWAY),
+            upstreamError,
+            currentConnectionId,
+            resetsAtMs: resetMs ? Date.now() + resetMs : undefined,
+            translatedBody,
+            model,
+            stream,
+          });
+        } : undefined,
         onExhausted: (reason, { upstreamError } = {}) => {
           if (!onUpstreamEmptyExhausted) return;
-          // Quota-style exhaustion carries the reset time only inside the error
-          // message ("Your quota will reset after 2h7m23s") — bench precisely.
           const resetMs = executor.parseRetryFromErrorMessage?.(upstreamError?.message || reason);
           return onUpstreamEmptyExhausted(
             formatProviderError(new Error(reason), provider, model, HTTP_STATUS.BAD_GATEWAY),

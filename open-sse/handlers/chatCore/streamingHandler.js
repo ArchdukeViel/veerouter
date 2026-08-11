@@ -44,13 +44,21 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log }) {
-  if (onRequestSuccess) {
+  // Defer the account-success callback until the stream actually produces
+  // SOMETHING — HTTP 200 with zero bytes / thought-only / empty attempts is
+  // still a failure mode for the client. Clearing the account's error state
+  // before that risks marking a quota-exhausted account healthy again from a
+  // 200-with-no-body response.
+  let requestSuccessFired = false;
+  const fireRequestSuccess = () => {
+    if (requestSuccessFired || !onRequestSuccess) return;
+    requestSuccessFired = true;
     Promise.resolve()
       .then(onRequestSuccess)
       .catch(err => {
         console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
       });
-  }
+  };
 
   // When upstream returns HTML/text instead of SSE (e.g. Cloudflare 5xx error
   // page), piping it through the SSE transform stream causes Next.js
@@ -87,6 +95,19 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
 
+  // Tee the stream: fire the deferred success callback the first time a
+  // translated byte actually crosses the wire. A 200 stream that aborts or
+  // empties before emitting anything never reaches this tee and therefore
+  // never clears the account error state.
+  const successTee = new TransformStream({
+    transform(chunk, controller) {
+      fireRequestSuccess();
+      controller.enqueue(chunk);
+    },
+  });
+
+  const finalStream = transformedBody.pipeThrough(successTee);
+
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
     latency: { ttft: 0, total: Date.now() - requestStartTime },
@@ -103,7 +124,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 
   return {
     success: true,
-    response: new Response(transformedBody, { headers: SSE_HEADERS })
+    response: new Response(finalStream, { headers: SSE_HEADERS })
   };
 }
 

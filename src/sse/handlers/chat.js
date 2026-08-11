@@ -22,6 +22,7 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { getExecutor } from "open-sse/executors/index.js";
 
 /**
  * Handle chat completion request
@@ -259,6 +260,64 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+
+    const chatCoreCtx = {};
+    const onAccountExhausted = async ({ reason, upstreamError, currentConnectionId, resetsAtMs }) => {
+      // 1. Bench current account
+      await markAccountUnavailable(currentConnectionId, HTTP_STATUS.BAD_GATEWAY, reason, provider, model, resetsAtMs);
+
+      // 2. Add current account to exclusion set
+      excludeConnectionIds.add(currentConnectionId);
+
+      // 3. Select next eligible account
+      const next = await getProviderCredentials(provider, excludeConnectionIds, model);
+      if (!next || next.allRateLimited) return null;
+
+      // 4. Refresh token + resolve projectId for new account
+      const nextRefreshed = await checkAndRefreshToken(provider, next);
+      if ((provider === "antigravity" || provider === "gemini-cli") && !nextRefreshed.projectId) {
+        const pid = await getProjectIdForConnection(next.connectionId, nextRefreshed.accessToken, provider);
+        if (pid) {
+          nextRefreshed.projectId = pid;
+          updateProviderCredentials(next.connectionId, { projectId: pid }).catch(() => { });
+        }
+      }
+
+      // 5. Recompute proxy options from new account credentials
+      const nextProxyOptions = {
+        connectionProxyEnabled: nextRefreshed?.providerSpecificData?.connectionProxyEnabled === true,
+        connectionProxyUrl: nextRefreshed?.providerSpecificData?.connectionProxyUrl || "",
+        connectionNoProxy: nextRefreshed?.providerSpecificData?.connectionNoProxy || "",
+        vercelRelayUrl: nextRefreshed?.providerSpecificData?.vercelRelayUrl || "",
+      };
+
+      log.warn("ROTATE", `⇄ ACC:${currentConnectionId.slice(0, 8)} EMPTY-EXHAUSTED → ACC:${nextRefreshed.connectionName || next.connectionId.slice(0, 8)}`);
+      log.warn("ROTATE", `    reason=${reason?.slice?.(0, 80)} | upstream=${upstreamError?.status || upstreamError?.code || "EMPTY"}`);
+
+      return {
+        connectionId: next.connectionId,
+        credentials: nextRefreshed,
+        proxyOptions: nextProxyOptions,
+        reexecute: async () => {
+          const retryResult = await getExecutor(provider).execute({
+            model,
+            body: chatCoreCtx.translatedBody,
+            stream: true,
+            credentials: nextRefreshed,
+            signal: chatCoreCtx.streamControllerSignal,
+            log,
+            proxyOptions: nextProxyOptions,
+          });
+          if (!retryResult.response.ok) {
+            const status = retryResult.response.status;
+            throw new Error(`[${status}] rotation upstream non-2xx`);
+          }
+          if (!retryResult.response.body) throw new Error("rotation upstream returned no body");
+          return retryResult.response.body;
+        },
+      };
+    };
+
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
@@ -296,14 +355,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
       },
-      // Antigravity empty-stream guard: when every in-stream retry came back
-      // empty (the literal [Empty streaming response] case), bench the account
-      // so the client's automatic retry rotates to the next one. resetsAtMs
-      // comes from the upstream quota-reset parser when available, so the
-      // cooldown is precise instead of the generic exponential backoff.
       onUpstreamEmptyExhausted: async (reason, resetsAtMs) => {
         await markAccountUnavailable(credentials.connectionId, HTTP_STATUS.BAD_GATEWAY, reason, provider, model, resetsAtMs);
-      }
+      },
+      onAccountExhausted,
+      chatCoreCtx,
     });
 
     if (result.success) return result.response;

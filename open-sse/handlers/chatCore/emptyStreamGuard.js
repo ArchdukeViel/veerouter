@@ -98,16 +98,20 @@ function classifyEvent(parsed, meaningfulSeen) {
  * @param {AbortSignal} options.signal        client-disconnect signal
  * @param {object} options.log
  * @param {number} options.stallTimeoutMs     per-read stall escape
- * @param {(reason: string, meta: { upstreamError: object|null }) => void|Promise<void>} options.onExhausted
- *   observer for "every attempt came back empty" (e.g. bench the account so
- *   client retries rotate); awaited before the error event is emitted, and
- *   handed the held upstream error object so quota reset times can be parsed
+ * @param {string} [options.connectionId]     connectionId of initial account
+ * @param {(reason: string, meta: { upstreamError: object|null }) => void|Promise<void>} [options.onExhausted]
+ *   observer for "every attempt came back empty" when onAccountExhausted is not provided
+ * @param {(info: { reason: string, upstreamError: object|null, currentConnectionId: string }) => Promise<{ reexecute: () => Promise<ReadableStream>, connectionId?: string }|null>} [options.onAccountExhausted]
+ *   server-side account recovery hook: called when same-account retries exhaust.
+ *   Benches current account, excludes it, and returns the next account's reexecute factory.
  * @returns {ReadableStream} byte stream for the SSE transform pipeline
  */
-export function createEmptyRetryStream({ body, reexecute, signal, log, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, baseDelayMs = EMPTY_STREAM_BASE_DELAY_MS, onExhausted }) {
+export function createEmptyRetryStream({ body, reexecute, signal, log, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, baseDelayMs = EMPTY_STREAM_BASE_DELAY_MS, connectionId = "", onExhausted, onAccountExhausted }) {
   const encoder = new TextEncoder();
   let currentReader = null;
   let downstreamGone = false;
+  let currentConnectionId = connectionId;
+  let activeReexecute = reexecute;
 
   return new ReadableStream({
     async start(controller) {
@@ -232,7 +236,33 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, stallTime
         log?.warn?.("STREAM", `ANTIGRAVITY | empty (${reason}) | attempt ${attempt + 1}/${EMPTY_STREAM_MAX_RETRIES + 1}`);
 
         if (attempt >= EMPTY_STREAM_MAX_RETRIES) {
-          return exhaust(`empty response from upstream (${reason}) after ${attempt + 1} attempts`);
+          const exhaustReason = `empty response from upstream (${reason}) after ${attempt + 1} attempts`;
+          if (onAccountExhausted) {
+            try {
+              const next = await onAccountExhausted({
+                reason: exhaustReason,
+                upstreamError: lastHeld?.error || null,
+                currentConnectionId,
+              });
+              if (next && typeof next.reexecute === "function") {
+                if (signal?.aborted) return abortStream();
+                activeReexecute = next.reexecute;
+                if (next.connectionId) currentConnectionId = next.connectionId;
+                log?.warn?.("STREAM", `ANTIGRAVITY | rotating account in-stream after ${attempt + 1} empty attempts → ${currentConnectionId?.slice?.(0, 8) || "next"}`);
+                attempt = -1; // reset attempt counter for rotated account
+                try {
+                  currentReader = (await activeReexecute()).getReader();
+                  continue;
+                } catch (err) {
+                  if (err?.name === "AbortError" || signal?.aborted) return abortStream();
+                  return exhaust(err?.message || "rotated reexecute failed");
+                }
+              }
+            } catch (error) {
+              log?.warn?.("STREAM", `ANTIGRAVITY | onAccountExhausted threw: ${error?.message || error}`);
+            }
+          }
+          return exhaust(exhaustReason);
         }
 
         // Abort-aware backoff, then splice the retried attempt into this stream.
@@ -243,7 +273,7 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, stallTime
         if (signal?.aborted) return abortStream();
 
         try {
-          currentReader = (await reexecute()).getReader();
+          currentReader = (await activeReexecute()).getReader();
         } catch (error) {
           if (error?.name === "AbortError" || signal?.aborted) return abortStream();
           return exhaust(error?.message || "retry request failed");

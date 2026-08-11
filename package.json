@@ -23,7 +23,7 @@
     "cli:pack": "npm --prefix cli run pack:cli",
     "cli:publish": "npm --prefix cli run publish:cli",
     "cli:build": "npm --prefix cli run build",
-    "cli:install": "npm --prefix cli run install:global"
+    "cli:install": "npm install -g ./cli --allow-scripts=.,9router,9router@0.5.50 --no-audit --no-fund"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

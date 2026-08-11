@@ -23,6 +23,17 @@ import { STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 export const EMPTY_STREAM_MAX_RETRIES = 2;
 export const EMPTY_STREAM_BASE_DELAY_MS = 500;
 
+// Account-rotation policy: only retry/rotate for upstream conditions that are
+// likely to differ between accounts. Deterministic errors (bad request,
+// unauthorized, schema validation, malformed client payload) hit every
+// account the same way and waste rotation slots.
+export function isRetryableStatus(status) {
+  if (typeof status !== "number" || !Number.isFinite(status)) return true;
+  if (status === 408 || status === 425 || status === 429) return true;
+  if (status >= 500 && status < 600) return status !== 501;
+  return false;
+}
+
 // A part is meaningful when it carries output the client can act on: a tool
 // call, inline data, or non-whitespace visible text. Thought-only parts are
 // not — thinking that never produced an answer IS the empty-response failure
@@ -135,6 +146,38 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, stallTime
         err.name = "AbortError";
         try { controller.error(err); } catch { /* already closed */ }
       };
+
+      // Parse "[NNN] message" prefix from chatCore's reexecute-thrown errors
+      // so we can classify retryable vs deterministic upstream failures.
+      const parseStatusFromMessage = (msg) => {
+        if (typeof msg !== "string") return null;
+        const m = msg.match(/^\s*\[(\d{3})\]\s*/);
+        return m ? Number(m[1]) : null;
+      };
+      const classifyError = (error) => {
+        const status = error?.status ?? parseStatusFromMessage(error?.message) ?? null;
+        if (status !== null && status !== undefined) return { status, retryable: isRetryableStatus(status) };
+        // Network / transport — rotate to next account
+        const name = error?.name || "";
+        if (name === "AbortError") return { status: null, retryable: false };
+        const lower = String(error?.message || "").toLowerCase();
+        const retryable =
+          lower.includes("econnreset") || lower.includes("etimedout") || lower.includes("epipe") ||
+          lower.includes("fetch failed") || lower.includes("network") || lower.includes("socket hang up") ||
+          lower.includes("temporary") || lower.includes("capacity") ||
+          lower.includes("high traffic") || lower.includes("timeout") || lower.includes("timed out") ||
+          lower.includes("agent execution terminated") || lower.includes("terminated due to error") ||
+          lower.includes("stream ended") || lower.includes("stream closed") ||
+          lower.includes("und_err_socket") || lower.includes("empty response") ||
+          lower.includes("resource_exhausted") || lower.includes("quota");
+        const deterministic =
+          lower.includes("bad request") || lower.includes("unauthorized") || lower.includes("forbidden") ||
+          lower.includes("not found") || lower.includes("method not allowed") || lower.includes("not acceptable") ||
+          lower.includes("payload too large") || lower.includes("schema") || lower.includes("validation") ||
+          lower.includes("malformed");
+        return { status: null, retryable: retryable && !deterministic };
+      };
+
       const exhaust = async (reason) => {
         // Bench-before-emit: the error event triggers the client's automatic
         // retry, so the observer (account bench) must complete first or the
@@ -276,6 +319,42 @@ export function createEmptyRetryStream({ body, reexecute, signal, log, stallTime
           currentReader = (await activeReexecute()).getReader();
         } catch (error) {
           if (error?.name === "AbortError" || signal?.aborted) return abortStream();
+
+          // Classify the failure: retryable (rotate to next account) or
+          // deterministic (exhaust immediately). Reusing the same rotation
+          // path as the empty-retry case keeps both behaviors consistent.
+          const cls = classifyError(error);
+          if (cls.retryable && onAccountExhausted) {
+            log?.warn?.("STREAM", `ANTIGRAVITY | retryable fetch failure (${error?.message?.slice?.(0, 80) || "unknown"}) on attempt ${attempt + 1} — rotating`);
+            try {
+              const next = await onAccountExhausted({
+                reason: `retryable fetch failure: ${error?.message || "unknown"}`,
+                upstreamError: { code: cls.status ?? 0, status: error?.message || "fetch failed" },
+                currentConnectionId,
+              });
+              if (next && typeof next.reexecute === "function") {
+                if (signal?.aborted) return abortStream();
+                activeReexecute = next.reexecute;
+                if (next.connectionId) currentConnectionId = next.connectionId;
+                attempt = -1;
+                try {
+                  currentReader = (await activeReexecute()).getReader();
+                  continue;
+                } catch (err) {
+                  if (err?.name === "AbortError" || signal?.aborted) return abortStream();
+                  const inner = classifyError(err);
+                  if (inner.retryable) {
+                    log?.warn?.("STREAM", `ANTIGRAVITY | rotated reexecute still retryable (${err?.message?.slice?.(0, 80) || "unknown"}) — falling through to exhaust`);
+                  }
+                  return exhaust(err?.message || "rotated reexecute failed");
+                }
+              }
+            } catch (rotErr) {
+              log?.warn?.("STREAM", `ANTIGRAVITY | onAccountExhausted threw during fetch-failure recovery: ${rotErr?.message || rotErr}`);
+            }
+          } else if (!cls.retryable) {
+            log?.warn?.("STREAM", `ANTIGRAVITY | deterministic fetch failure (${error?.message?.slice?.(0, 80) || "unknown"}) on attempt ${attempt + 1} — no rotate`);
+          }
           return exhaust(error?.message || "retry request failed");
         }
       }

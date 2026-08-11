@@ -25,6 +25,69 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { getExecutor } from "open-sse/executors/index.js";
 
 /**
+ * Classify an upstream HTTP status for account-rotation policy.
+ *
+ * Retryable across accounts (transient / quota / server-side problems):
+ *   408 Request Timeout, 425 Too Early, 429 Too Many Requests, 500 Internal
+ *   Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout,
+ *   507 Insufficient Storage, 522/523/524 Cloudflare-style.
+ *
+ * Deterministic (do NOT rotate — every account will see the same outcome):
+ *   400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found,
+ *   405 Method Not Allowed, 406 Not Acceptable, 409 Conflict (when not a
+ *   concurrent-write race), 410 Gone, 411 Length Required, 412 Precondition
+ *   Failed, 413 Payload Too Large, 414 URI Too Long, 415 Unsupported Media,
+ *   416 Range Not Satisfiable, 417 Expectation Failed, 418/421/422/426.
+ */
+export function isRetryableStatus(status) {
+  if (typeof status !== "number" || !Number.isFinite(status)) return true; // unknown → give the next account a chance
+  if (status === 408 || status === 425 || status === 429) return true;
+  if (status >= 500 && status < 600) {
+    // 501 Not Implemented is technically retryable-but-pointless on the same
+    // upstream; rotating still costs a slot, so treat as not-retryable to
+    // avoid burning accounts on a structurally-bad provider endpoint.
+    return status !== 501;
+  }
+  return false;
+}
+
+/**
+ * Classify a thrown error (no status code attached) for rotation policy.
+ * Returns true when rotating to another account is worth attempting.
+ */
+export function isRetryableError(err) {
+  if (!err) return false;
+  if (err.name === "AbortError") return false;
+  if (typeof err.status === "number" && Number.isFinite(err.status)) return isRetryableStatus(err.status);
+  const msg = String(err.message || "").toLowerCase();
+  if (!msg) return true; // unknown → try
+  // Network / transport / transient
+  if (
+    msg.includes("econnreset") || msg.includes("etimedout") || msg.includes("epipe") ||
+    msg.includes("econnrefused") || msg.includes("enotfound") || msg.includes("eai_again") ||
+    msg.includes("fetch failed") || msg.includes("network") || msg.includes("socket hang up") ||
+    msg.includes("temporary unavailable") || msg.includes("capacity") ||
+    msg.includes("high traffic") || msg.includes("timeout") || msg.includes("timed out") ||
+    msg.includes("agent execution terminated") || msg.includes("terminated due to error") ||
+    msg.includes("stream ended") || msg.includes("stream closed") || msg.includes("stream terminated") ||
+    msg.includes("empty response") || msg.includes("und_err_socket") ||
+    msg.includes("resource_exhausted") || msg.includes("quota")
+  ) return true;
+  // Deterministic upstream
+  if (
+    msg.includes("bad request") || msg.includes("[400]") ||
+    msg.includes("unauthorized") || msg.includes("[401]") ||
+    msg.includes("forbidden") || msg.includes("[403]") ||
+    msg.includes("not found") || msg.includes("[404]") ||
+    msg.includes("method not allowed") || msg.includes("not acceptable") ||
+    msg.includes("payload too large") || msg.includes("uri too long") ||
+    msg.includes("schema") || msg.includes("validation") ||
+    msg.includes("invalid api key") || msg.includes("malformed")
+  ) return false;
+  return true; // unknown → try
+}
+
+/**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
@@ -261,9 +324,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
 
-    const chatCoreCtx = {};
+    // Mutable active-account context — threads the LIVE account identity through
+    // every callback (success/refresh/rotate) so that after A → B rotation the
+    // success callback clears B, not A. Capturing `credentials` directly in any
+    // closure makes success clearing target the originally opened account, which
+    // can resurrect a freshly benched account as soon as a sibling succeeds.
+    const initialProxyOptions = {
+      connectionProxyEnabled: refreshedCredentials?.providerSpecificData?.connectionProxyEnabled === true,
+      connectionProxyUrl: refreshedCredentials?.providerSpecificData?.connectionProxyUrl || "",
+      connectionNoProxy: refreshedCredentials?.providerSpecificData?.connectionNoProxy || "",
+      vercelRelayUrl: refreshedCredentials?.providerSpecificData?.vercelRelayUrl || "",
+    };
+    const activeAccount = {
+      connectionId: credentials.connectionId,
+      credentials: refreshedCredentials,
+      proxyOptions: initialProxyOptions,
+      reexecute: null,
+    };
+
+    const chatCoreCtx = { activeAccount };
+
     const onAccountExhausted = async ({ reason, upstreamError, currentConnectionId, resetsAtMs }) => {
-      // 1. Bench current account
+      // 1. Bench current account (the one whose empty retries just exhausted)
       await markAccountUnavailable(currentConnectionId, HTTP_STATUS.BAD_GATEWAY, reason, provider, model, resetsAtMs);
 
       // 2. Add current account to exclusion set
@@ -294,27 +376,46 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       log.warn("ROTATE", `⇄ ACC:${currentConnectionId.slice(0, 8)} EMPTY-EXHAUSTED → ACC:${nextRefreshed.connectionName || next.connectionId.slice(0, 8)}`);
       log.warn("ROTATE", `    reason=${reason?.slice?.(0, 80)} | upstream=${upstreamError?.status || upstreamError?.code || "EMPTY"}`);
 
+      // 6. Build reexecute factory bound to the NEW account. The empty-stream
+      //    guard calls this on every retry after rotation; using live activeAccount
+      //    fields ensures later rotation hops stay consistent.
+      const rotatedReexecute = async () => {
+        const retryResult = await getExecutor(provider).execute({
+          model,
+          body: chatCoreCtx.translatedBody,
+          stream: true,
+          credentials: nextRefreshed,
+          signal: chatCoreCtx.streamControllerSignal,
+          log,
+          proxyOptions: nextProxyOptions,
+        });
+        if (!retryResult.response.ok) {
+          const status = retryResult.response.status;
+          const err = new Error(`[${status}] rotation upstream non-2xx`);
+          err.status = status;
+          err.isRetryable = isRetryableStatus(status);
+          throw err;
+        }
+        if (!retryResult.response.body) {
+          const err = new Error("rotation upstream returned no body");
+          err.isRetryable = false;
+          throw err;
+        }
+        return retryResult.response.body;
+      };
+
+      // 7. Update the active-account context so any later callback
+      //    (success / refresh / rotate) targets the new account.
+      activeAccount.connectionId = next.connectionId;
+      activeAccount.credentials = nextRefreshed;
+      activeAccount.proxyOptions = nextProxyOptions;
+      activeAccount.reexecute = rotatedReexecute;
+
       return {
         connectionId: next.connectionId,
         credentials: nextRefreshed,
         proxyOptions: nextProxyOptions,
-        reexecute: async () => {
-          const retryResult = await getExecutor(provider).execute({
-            model,
-            body: chatCoreCtx.translatedBody,
-            stream: true,
-            credentials: nextRefreshed,
-            signal: chatCoreCtx.streamControllerSignal,
-            log,
-            proxyOptions: nextProxyOptions,
-          });
-          if (!retryResult.response.ok) {
-            const status = retryResult.response.status;
-            throw new Error(`[${status}] rotation upstream non-2xx`);
-          }
-          if (!retryResult.response.body) throw new Error("rotation upstream returned no body");
-          return retryResult.response.body;
-        },
+        reexecute: rotatedReexecute,
       };
     };
 
@@ -345,21 +446,31 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       providerThinking,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
+      // Active-account context (via chatCoreCtx) — every callback reads/writes
+      // THIS object so success clearing targets whichever account actually
+      // emitted the bytes, not the originally selected one.
+      chatCoreCtx,
       onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
+        // Persist refreshed token to DB using the LIVE connectionId. The
+        // chatCore already mutates the same credentials object passed in, so
+        // activeAccount.credentials is kept in sync automatically.
+        await updateProviderCredentials(activeAccount.connectionId, {
           ...newCreds,
-          existingProviderSpecificData: credentials.providerSpecificData,
+          existingProviderSpecificData: activeAccount.credentials?.providerSpecificData,
           testStatus: "active"
         });
       },
       onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials, model);
+        // Clear the account that ACTUALLY produced output, not the original.
+        await clearAccountError(activeAccount.connectionId, activeAccount.credentials, model);
       },
       onUpstreamEmptyExhausted: async (reason, resetsAtMs) => {
-        await markAccountUnavailable(credentials.connectionId, HTTP_STATUS.BAD_GATEWAY, reason, provider, model, resetsAtMs);
+        // Fallback path: legacy callback when rotation is unavailable. Use the
+        // live active-account identity so a rotated account's failure benches
+        // itself, not the original opener.
+        await markAccountUnavailable(activeAccount.connectionId, HTTP_STATUS.BAD_GATEWAY, reason, provider, model, resetsAtMs);
       },
       onAccountExhausted,
-      chatCoreCtx,
     });
 
     if (result.success) return result.response;

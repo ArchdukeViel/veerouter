@@ -48,6 +48,7 @@
   },
   "allowScripts": {
     "9router": true,
+    "9router@0.5.50": true,
     "esbuild@0.25.12": true
   }
 }

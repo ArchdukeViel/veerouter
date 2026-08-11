@@ -84,30 +84,37 @@ if (cliMode) {
 
   const commandName = process.platform === "win32" ? "9router.cmd" : "9router";
   const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-  const prefixResult = spawnSync(npmCommand, ["prefix", "-g"], {
+  const readNpmValue = (args) => {
+    const result = spawnSync(npmCommand, args, {
+      cwd: rootDir,
+      encoding: "utf8",
+      shell: process.platform === "win32",
+      windowsHide: true,
+    });
+    if (result.status !== 0) return null;
+    return `${result.stdout || ""}`.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop() || null;
+  };
+  const globalPrefix = readNpmValue(["config", "get", "prefix"]) || readNpmValue(["prefix", "-g"]);
+  const globalRoot = readNpmValue(["root", "-g"]);
+  const globalCommandPath = (process.platform === "win32"
+    ? [globalPrefix && path.join(globalPrefix, commandName)]
+    : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName)]
+  ).find((candidate) => candidate && fs.existsSync(candidate));
+  const globalPackageEntry = globalRoot && path.join(globalRoot, cliPackage.name, "cli.js");
+  const invocation = globalCommandPath
+    ? { command: globalCommandPath, args: ["--version"], shell: process.platform === "win32" }
+    : globalPackageEntry && fs.existsSync(globalPackageEntry)
+      ? { command: process.execPath, args: [globalPackageEntry, "--version"], shell: false }
+      : { command: commandName, args: ["--version"], shell: process.platform === "win32" };
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: rootDir,
     encoding: "utf8",
-    shell: process.platform === "win32",
-    windowsHide: true,
-  });
-  const globalPrefix = prefixResult.status === 0
-    ? `${prefixResult.stdout || ""}`.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop()
-    : null;
-  const globalCommandCandidates = process.platform === "win32"
-    ? [globalPrefix && path.join(globalPrefix, commandName), commandName]
-    : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName), commandName];
-  const command = globalCommandCandidates.find((candidate) =>
-    candidate && (!path.isAbsolute(candidate) || fs.existsSync(candidate))
-  ) || commandName;
-  const result = spawnSync(command, ["--version"], {
-    cwd: rootDir,
-    encoding: "utf8",
-    shell: process.platform === "win32",
+    shell: invocation.shell,
     windowsHide: true,
   });
   const version = `${result.stdout || ""}${result.stderr || ""}`.trim();
   if (result.status !== 0) {
-    errors.push(`global ${commandName} --version failed (${command}): ${version || "no output"}`);
+    errors.push(`global ${commandName} --version failed (${invocation.command}): ${version || "no output"}`);
   } else if (version !== cliPackage.version) {
     errors.push(`global CLI version ${version} does not match local ${cliPackage.version}`);
   } else {

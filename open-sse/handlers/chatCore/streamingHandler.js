@@ -43,7 +43,7 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, emptyGuardState }) {
   // Defer the account-success callback until the stream actually produces
   // SOMETHING — HTTP 200 with zero bytes / thought-only / empty attempts is
   // still a failure mode for the client. Clearing the account's error state
@@ -52,6 +52,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   let requestSuccessFired = false;
   const fireRequestSuccess = () => {
     if (requestSuccessFired || !onRequestSuccess) return;
+    if (emptyGuardState?.exhausted && !emptyGuardState.meaningful) return;
     requestSuccessFired = true;
     Promise.resolve()
       .then(onRequestSuccess)

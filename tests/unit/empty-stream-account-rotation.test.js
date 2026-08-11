@@ -246,4 +246,26 @@ describe("empty-stream guard: corrected server-side account rotation state machi
     await expect(drained).rejects.toMatchObject({ name: "AbortError" });
     expect(onAccountExhausted).not.toHaveBeenCalled();
   });
+
+  it("refuses an A to B to A selector loop and emits one terminal error", async () => {
+    const selected = [];
+    const onAccountExhausted = vi.fn(async ({ currentConnectionId }) => {
+      selected.push(currentConnectionId);
+      const nextId = currentConnectionId === "acc-A" ? "acc-B" : "acc-A";
+      return {
+        connectionId: nextId,
+        reexecute: async () => sseBody([bareStop()]),
+      };
+    });
+
+    const { run } = buildWrapper({
+      attempts: [[bareStop()], [bareStop()], [bareStop()]],
+      connectionId: "acc-A",
+      onAccountExhausted,
+    });
+
+    const out = await run();
+    expect(dataEvents(out)[0].error.status).toBe("EMPTY_RESPONSE");
+    expect(selected).toEqual(["acc-A", "acc-B"]);
+  });
 });

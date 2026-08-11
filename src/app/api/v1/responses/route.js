@@ -1,5 +1,6 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
+import { getRequestId, handleUnhandledRequestError } from "@/sse/utils/unhandledError.js";
 
 let initialized = false;
 
@@ -25,6 +26,11 @@ export async function OPTIONS() {
  * Now handled by translator pattern (openai-responses format auto-detected)
  */
 export async function POST(request) {
-  await ensureInitialized();
-  return await handleChat(request);
+  const requestId = getRequestId(request);
+  try {
+    await ensureInitialized();
+    return await handleChat(request, null, requestId);
+  } catch (error) {
+    return handleUnhandledRequestError({ requestId, error, phase: "route_init" });
+  }
 }

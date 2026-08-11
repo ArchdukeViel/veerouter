@@ -12,6 +12,21 @@ const buildHomeDir = path.join(cliDir, ".build-home");
 const buildDistDirName = ".next-cli-build";
 const buildDistDir = path.join(appDir, buildDistDirName);
 
+function getBuildIdentity() {
+  let sha = "unknown";
+  let dirty = false;
+  try {
+    sha = execSync("git rev-parse HEAD", { cwd: appDir, encoding: "utf8" }).trim() || sha;
+    dirty = !!execSync("git status --porcelain --untracked-files=all", { cwd: appDir, encoding: "utf8" }).trim();
+  } catch {
+    // Source archives without .git still get a timestamped unknown build.
+  }
+  return {
+    sha: dirty && sha !== "unknown" ? `${sha}-dirty` : sha,
+    builtAt: new Date().toISOString(),
+  };
+}
+
 // Exclude patterns for files/folders we don't want to copy
 const EXCLUDE_PATTERNS = [
   "@img",           // Sharp image processing (not needed with unoptimized images)
@@ -150,6 +165,7 @@ function assertRequiredApiArtifacts(cliAppDir) {
 
 function buildCliPackage() {
   console.log("📦 Building 9Router CLI package with Next.js...\n");
+  const buildIdentity = getBuildIdentity();
 
   fs.mkdirSync(buildHomeDir, { recursive: true });
   fs.mkdirSync(path.join(buildHomeDir, "AppData", "Roaming"), { recursive: true });
@@ -182,6 +198,8 @@ function buildCliPackage() {
         LOCALAPPDATA: path.join(buildHomeDir, "AppData", "Local"),
         NEXT_DIST_DIR: buildDistDirName,
         NEXT_TRACING_ROOT_MODE: "workspace",
+        NINEROUTER_BUILD_SHA: buildIdentity.sha,
+        NINEROUTER_BUILD_TIME: buildIdentity.builtAt,
       }
     });
     console.log("✅ Next.js build completed\n");

@@ -8,6 +8,8 @@ const tracingRoot = process.env.NEXT_TRACING_ROOT_MODE === "workspace"
   ? join(projectRoot, "..")
   : projectRoot;
 const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE || "128mb";
+const buildSha = process.env.NINEROUTER_BUILD_SHA || "unknown";
+const buildTime = process.env.NINEROUTER_BUILD_TIME || "unknown";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -31,7 +33,11 @@ const nextConfig = {
   images: {
     unoptimized: true
   },
-  env: {},
+  // Safe diagnostics only: this is a source/build identity, never a secret.
+  env: {
+    NINEROUTER_BUILD_SHA: buildSha,
+    NINEROUTER_BUILD_TIME: buildTime,
+  },
   experimental: {
     // #1529/#1572: LLM clients can send long context or base64 image payloads through /v1 rewrites.
     proxyClientMaxBodySize,

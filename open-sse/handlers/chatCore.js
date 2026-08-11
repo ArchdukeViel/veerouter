@@ -69,7 +69,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       return connectionId || "";
     }
   })();
-  const reqTag = log?.tagForSession ? log.tagForSession(sessionSeed) : (log?.nextTag ? log.nextTag() : "");
+  const sessionTag = log?.tagForSession ? log.tagForSession(sessionSeed) : (log?.nextTag ? log.nextTag() : "");
+  const requestId = clientRawRequest?.requestId || clientRawRequest?.headers?.["x-request-id"] || "";
+  const reqTag = requestId ? `${sessionTag} rid=${requestId}` : sessionTag;
 
   const sourceFormat = sourceFormatOverride || detectFormat(body);
 
@@ -280,11 +282,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
-  if (chatCoreCtx) {
-    chatCoreCtx.translatedBody = translatedBody;
-    chatCoreCtx.streamControllerSignal = streamController.signal;
-  }
-
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;
   log?.debug?.("REQUEST", `${provider.toUpperCase()} | ${model} | ${msgCount} msgs`);
 
@@ -296,6 +293,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     onError: () => trackPendingRequest(model, provider, connectionId, false),
     log, provider, model, reqTag
   });
+
+  if (chatCoreCtx) {
+    chatCoreCtx.translatedBody = translatedBody;
+    chatCoreCtx.streamControllerSignal = streamController.signal;
+  }
 
   const proxyOptions = {
     connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
@@ -437,14 +439,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // in-stream error event (retryable by Claude Code); onUpstreamEmptyExhausted
   // lets the caller bench the account so the client's retry rotates to the next
   // one (#2188, #2229, #2250, #2259, #2431).
-  if (provider === "antigravity" && stream && providerResponse.body) {
+  let emptyGuardState = null;
+  if (provider === "antigravity" && stream) {
+    emptyGuardState = { meaningful: false, exhausted: false };
     const reexecute = async () => {
       const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
       if (!retryResult.response.ok) {
         const { statusCode, message } = await parseUpstreamError(retryResult.response, executor);
         throw new Error(`[${statusCode}] ${message}`);
       }
-      if (!retryResult.response.body) throw new Error("upstream returned no body");
+      if (!retryResult.response.body) return null;
       return retryResult.response.body;
     };
     providerResponse = new Response(
@@ -453,6 +457,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         reexecute,
         signal: streamController.signal,
         log,
+        provider,
+        state: emptyGuardState,
         connectionId,
         onAccountExhausted: onAccountExhausted ? async ({ reason, upstreamError, currentConnectionId }) => {
           const resetMs = executor.parseRetryFromErrorMessage?.(upstreamError?.message || reason);
@@ -479,7 +485,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     );
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, emptyGuardState };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

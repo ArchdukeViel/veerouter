@@ -57,5 +57,13 @@ export async function GET() {
   const currentVersion = pkg.version;
   const hasUpdate = latestVersion ? compareVersions(latestVersion, currentVersion) > 0 : false;
 
-  return Response.json({ currentVersion, latestVersion, hasUpdate });
+  return Response.json({
+    currentVersion,
+    latestVersion,
+    hasUpdate,
+    build: {
+      commit: process.env.NINEROUTER_BUILD_SHA || "unknown",
+      builtAt: process.env.NINEROUTER_BUILD_TIME || "unknown",
+    },
+  });
 }

@@ -1,5 +1,6 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
+import { getRequestId, handleUnhandledRequestError } from "@/sse/utils/unhandledError.js";
 
 let initialized = false;
 
@@ -30,7 +31,12 @@ export async function OPTIONS() {
  * POST /v1/messages - Claude format (auto convert via handleChat)
  */
 export async function POST(request) {
-  await ensureInitialized();
-  return await handleChat(request);
+  const requestId = getRequestId(request);
+  try {
+    await ensureInitialized();
+    return await handleChat(request, null, requestId);
+  } catch (error) {
+    return handleUnhandledRequestError({ requestId, error, phase: "route_init" });
+  }
 }
 

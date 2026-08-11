@@ -51,6 +51,26 @@ describe("empty-stream edge cases (Bug 1 + 2 follow-ups)", () => {
     expect(onAccountExhausted).not.toHaveBeenCalled();
   });
 
+  it("retries a 200 response with no body instead of terminating immediately", async () => {
+    const reexecute = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(sseBody([text("recovered"), finish("STOP")]));
+    const state = { meaningful: false, exhausted: false };
+    const stream = createEmptyRetryStream({
+      body: null,
+      reexecute,
+      log: null,
+      baseDelayMs: 1,
+      connectionId: "acc-A",
+      state,
+    });
+
+    const out = await drain(stream);
+    expect(out).toContain("recovered");
+    expect(reexecute).toHaveBeenCalledTimes(2);
+    expect(state).toEqual({ meaningful: true, exhausted: false });
+  });
+
   it("RESOURCE_EXHAUSTED benches current account and forwards upstreamError to onAccountExhausted", async () => {
     const benched = [];
     let capturedUpstreamError = null;
@@ -85,6 +105,51 @@ describe("empty-stream edge cases (Bug 1 + 2 follow-ups)", () => {
     // emptyStreamGuard.onAccountExhausted handler that calls
     // executor.parseRetryFromErrorMessage). Here we just verify the error
     // reaches the app layer intact for it to parse.
+  });
+
+  it("processes a final SSE data event without a trailing newline", async () => {
+    const raw = `data: ${JSON.stringify(text("trailing"))}`;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(raw));
+        controller.close();
+      },
+    });
+    const reexecute = vi.fn();
+    const stream = createEmptyRetryStream({ body, reexecute, log: null, baseDelayMs: 1 });
+
+    const out = await drain(stream);
+    expect(out).toContain("trailing");
+    expect(reexecute).not.toHaveBeenCalled();
+  });
+
+  it("converts a locked upstream body into a contained stream error", async () => {
+    const body = sseBody([text("never read")]);
+    body.getReader();
+    const state = { meaningful: false, exhausted: false };
+    const stream = createEmptyRetryStream({ body, reexecute: vi.fn(), log: null, state });
+
+    const out = await drain(stream);
+    expect(out).toContain("STREAM_READ_ERROR");
+    expect(state.exhausted).toBe(true);
+  });
+
+  it("does not call the legacy bench observer twice when rotation is refused", async () => {
+    const onAccountExhausted = vi.fn(async () => null);
+    const onExhausted = vi.fn();
+    const stream = createEmptyRetryStream({
+      body: sseBody([bareStop()]),
+      reexecute: async () => sseBody([bareStop()]),
+      log: null,
+      baseDelayMs: 1,
+      connectionId: "acc-A",
+      onAccountExhausted,
+      onExhausted,
+    });
+
+    await drain(stream);
+    expect(onAccountExhausted).toHaveBeenCalledTimes(1);
+    expect(onExhausted).not.toHaveBeenCalled();
   });
 
   it("No A/B alternating loop: rotation mutates connectionId so success clears the active account only", async () => {

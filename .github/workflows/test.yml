@@ -1,0 +1,60 @@
+name: Test
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Offline gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            cli/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install CLI dependencies
+        run: npm ci --prefix cli --no-audit --no-fund
+
+      - name: Verify installed runtime pieces
+        run: npm run verify:install
+
+      - name: Run deterministic offline unit gate
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build production application
+        run: npm run build
+
+      - name: Build CLI package and artifacts
+        run: npm run cli:build
+
+      - name: Install CLI globally with explicit script approval
+        run: npm run cli:install
+
+      - name: Verify CLI version and built-server artifacts
+        run: npm run verify:cli

@@ -16,6 +16,7 @@
   "scripts": {
     "dev": "nodemon -I --watch cli.js --watch src --watch hooks --ext js,json cli.js",
     "build": "node scripts/build-cli.js",
+    "install:global": "npm install -g . --allow-scripts=9router --no-audit --no-fund",
     "pack:cli": "npm run build && npm pack --pack-destination ../..",
     "publish:cli": "npm run build && npm publish",
     "postinstall": "node hooks/postinstall.js",
@@ -44,5 +45,9 @@
   "devDependencies": {
     "esbuild": "^0.25.12",
     "nodemon": "^3.1.14"
+  },
+  "allowScripts": {
+    "9router": true,
+    "esbuild@0.25.12": true
   }
 }

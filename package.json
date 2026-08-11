@@ -4,6 +4,13 @@
   "description": "9Router web dashboard",
   "private": true,
   "scripts": {
+    "test": "npm run test:unit:offline",
+    "test:unit:offline": "vitest --config tests/vitest.offline.config.js run tests/unit",
+    "test:unit:all": "vitest --config tests/vitest.config.js run tests/unit",
+    "test:live": "node scripts/run-live-tests.mjs",
+    "verify:install": "node scripts/verify-install.mjs",
+    "verify:cli": "node scripts/verify-install.mjs --cli",
+    "lint": "eslint open-sse src/app/api src/lib src/models scripts tests",
     "dev": "next dev --port 20127",
     "dev:webpack": "next dev --webpack --port 20127",
     "build": "next build --webpack",
@@ -14,7 +21,9 @@
     "build:bun": "bun --bun next build --webpack",
     "start:bun": "bun ./.next/standalone/server.js",
     "cli:pack": "npm --prefix cli run pack:cli",
-    "cli:publish": "npm --prefix cli run publish:cli"
+    "cli:publish": "npm --prefix cli run publish:cli",
+    "cli:build": "npm --prefix cli run build",
+    "cli:install": "npm --prefix cli run install:global"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -49,7 +58,7 @@
     "zustand": "^5.0.10"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^12.6.2"
+    "better-sqlite3": "12.11.1"
   },
   "comment_better_sqlite3": "kept in optionalDependencies so npm install doesn't fail on systems without build tools — sql.js is used as fallback at runtime",
   "devDependencies": {
@@ -57,6 +66,11 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4"
+    "tailwindcss": "^4",
+    "vitest": "4.1.10"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "unrs-resolver@1.12.2": true
   }
 }

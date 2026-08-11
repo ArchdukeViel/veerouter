@@ -445,6 +445,185 @@ export function encodeMcpTool(tool) {
   );
 }
 
+// ==================== AGENT SERVICE CODECS ====================
+//
+// Cursor's AgentService uses the standard google.protobuf.Value shape for
+// JSON-like tool schemas and arguments. Keep these helpers independent from
+// the legacy ChatService MCP codec above: the two protocols use different
+// field layouts even though both carry MCP data.
+
+function encodeFixed64Field(fieldNum, value) {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setFloat64(0, Number(value), true);
+  return concatArrays(encodeVarint((fieldNum << 3) | WIRE_TYPE.FIXED64), bytes);
+}
+
+function encodeAgentMapEntry(key, value) {
+  return concatArrays(
+    encodeField(1, WIRE_TYPE.LEN, key),
+    encodeField(2, WIRE_TYPE.LEN, encodeAgentValue(value))
+  );
+}
+
+/** Encode a JSON-compatible value as google.protobuf.Value. */
+export function encodeAgentValue(value) {
+  if (value === null || value === undefined) {
+    return encodeField(1, WIRE_TYPE.VARINT, 0);
+  }
+
+  if (typeof value === "boolean") {
+    return encodeField(4, WIRE_TYPE.VARINT, value ? 1 : 0);
+  }
+
+  if (typeof value === "number") {
+    return encodeFixed64Field(2, value);
+  }
+
+  if (typeof value === "string") {
+    return encodeField(3, WIRE_TYPE.LEN, value);
+  }
+
+  if (Array.isArray(value)) {
+    const list = concatArrays(
+      ...value.map((item) => encodeField(1, WIRE_TYPE.LEN, encodeAgentValue(item)))
+    );
+    return encodeField(6, WIRE_TYPE.LEN, list);
+  }
+
+  if (typeof value === "object") {
+    const struct = concatArrays(
+      ...Object.entries(value).map(([key, item]) =>
+        encodeField(1, WIRE_TYPE.LEN, encodeAgentMapEntry(key, item))
+      )
+    );
+    return encodeField(5, WIRE_TYPE.LEN, struct);
+  }
+
+  throw new TypeError(`Unsupported AgentService value type: ${typeof value}`);
+}
+
+function decodeAgentValueBytes(value) {
+  return value instanceof Uint8Array ? value : new Uint8Array(value || []);
+}
+
+function decodeAgentString(value) {
+  return new TextDecoder().decode(decodeAgentValueBytes(value));
+}
+
+/** Decode a google.protobuf.Value into its JSON-compatible representation. */
+export function decodeAgentValue(data) {
+  const fields = decodeMessage(decodeAgentValueBytes(data));
+
+  if (fields.has(1)) return null;
+  if (fields.has(2)) {
+    const bytes = decodeAgentValueBytes(fields.get(2)[0].value);
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(0, true);
+  }
+  if (fields.has(3)) return decodeAgentString(fields.get(3)[0].value);
+  if (fields.has(4)) return fields.get(4)[0].value !== 0;
+  if (fields.has(5)) {
+    const struct = {};
+    const structMessage = decodeMessage(fields.get(5)[0].value);
+    for (const entryField of structMessage.get(1) || []) {
+      const entry = decodeMessage(entryField.value);
+      const key = entry.has(1) ? decodeAgentString(entry.get(1)[0].value) : "";
+      const value = entry.has(2) ? decodeAgentValue(entry.get(2)[0].value) : null;
+      struct[key] = value;
+    }
+    return struct;
+  }
+  if (fields.has(6)) {
+    const list = decodeMessage(fields.get(6)[0].value);
+    return (list.get(1) || []).map((item) => decodeAgentValue(item.value));
+  }
+
+  return null;
+}
+
+function toolDefinitionParts(tool) {
+  const definition = tool?.function || tool || {};
+  const name = definition.name || tool?.name || "";
+  const description = definition.description || tool?.description || "";
+  const inputSchema = definition.parameters || definition.input_schema
+    || tool?.inputSchema || tool?.input_schema || {};
+  return { name, description, inputSchema };
+}
+
+/** Encode agent.v1.McpToolDefinition. */
+export function encodeMcpToolDefinition(tool) {
+  const { name, description, inputSchema } = toolDefinitionParts(tool);
+  return concatArrays(
+    encodeField(1, WIRE_TYPE.LEN, name),
+    ...(description ? [encodeField(2, WIRE_TYPE.LEN, description)] : []),
+    encodeField(3, WIRE_TYPE.LEN, encodeAgentValue(inputSchema)),
+    encodeField(4, WIRE_TYPE.LEN, "9router"),
+    encodeField(5, WIRE_TYPE.LEN, name)
+  );
+}
+
+/** Encode agent.v1.McpTools, whose field 1 is repeated definitions. */
+export function encodeMcpTools(tools = []) {
+  return concatArrays(
+    ...(Array.isArray(tools) ? tools : []).map((tool) =>
+      encodeField(1, WIRE_TYPE.LEN, encodeMcpToolDefinition(tool))
+    )
+  );
+}
+
+/** Decode agent.v1.McpArgs, including its typed argument map. */
+export function decodeMcpArgs(data) {
+  const fields = decodeMessage(decodeAgentValueBytes(data));
+  const args = {};
+  for (const entryField of fields.get(2) || []) {
+    const entry = decodeMessage(entryField.value);
+    if (!entry.has(1)) continue;
+    const key = decodeAgentString(entry.get(1)[0].value);
+    args[key] = entry.has(2) ? decodeAgentValue(entry.get(2)[0].value) : null;
+  }
+  return {
+    name: fields.has(1) ? decodeAgentString(fields.get(1)[0].value) : "",
+    args,
+    toolCallId: fields.has(3) ? decodeAgentString(fields.get(3)[0].value) : "",
+    toolName: fields.has(5) ? decodeAgentString(fields.get(5)[0].value) : "",
+  };
+}
+
+function encodeMcpTextContent(text) {
+  return encodeField(1, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, text));
+}
+
+function encodeMcpImageContent(image) {
+  const data = image?.data instanceof Uint8Array
+    ? image.data
+    : Buffer.from(image?.data || []);
+  const imageMessage = concatArrays(
+    encodeField(1, WIRE_TYPE.LEN, data),
+    encodeField(2, WIRE_TYPE.LEN, image?.mimeType || image?.mime_type || "application/octet-stream")
+  );
+  return encodeField(2, WIRE_TYPE.LEN, imageMessage);
+}
+
+/** Encode a successful agent.v1.McpResult. */
+export function encodeMcpResultSuccess({ textItems = [], imageItems = [], isError = false } = {}) {
+  const content = [
+    ...(Array.isArray(textItems) ? textItems.map((text) => encodeMcpTextContent(String(text))) : []),
+    ...(Array.isArray(imageItems) ? imageItems.map(encodeMcpImageContent) : []),
+  ];
+  const success = concatArrays(
+    ...content.map((item) => encodeField(1, WIRE_TYPE.LEN, item)),
+    encodeField(2, WIRE_TYPE.VARINT, isError ? 1 : 0)
+  );
+  return encodeField(1, WIRE_TYPE.LEN, success);
+}
+
+export function encodeMcpResultError(message) {
+  return encodeField(2, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, String(message || "")));
+}
+
+export function encodeMcpResultToolNotFound(toolName) {
+  return encodeField(5, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, String(toolName || "")));
+}
+
 // ==================== REQUEST BUILDING ====================
 
 export function encodeRequest(messages, modelName, tools = [], reasoningEffort = null, forceAgentMode = false) {
@@ -892,6 +1071,14 @@ export function extractTextFromResponse(payload) {
 export default {
   encodeVarint,
   encodeField,
+  encodeAgentValue,
+  decodeAgentValue,
+  encodeMcpToolDefinition,
+  encodeMcpTools,
+  decodeMcpArgs,
+  encodeMcpResultSuccess,
+  encodeMcpResultError,
+  encodeMcpResultToolNotFound,
   encodeMessage,
   buildChatRequest,
   wrapConnectRPCFrame,

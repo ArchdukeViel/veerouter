@@ -3,6 +3,7 @@ import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import {
   generateCursorBody,
+  encodeMcpTools,
   encodeField,
   wrapConnectRPCFrame,
   decodeMessage,
@@ -70,15 +71,16 @@ function textFromContent(content) {
     .join("\n");
 }
 
-function isAgentTextRequest(body) {
-  // Many compatible clients always attach their built-in tool schemas, even
-  // for a normal text turn. Cursor's retired ChatService rejects those
-  // requests; AgentService can still answer the text turn, so ignore schemas
-  // here. A real tool-call/result conversation is kept on the legacy path
-  // until its AgentService tool protocol is implemented.
+export function isAgentCapableRequest(body) {
+  // Compatible clients may include tool schemas or prior tool-call/result
+  // messages in an otherwise textual conversation. AgentService can carry
+  // that history, while image/multimodal content still belongs on the legacy
+  // path until an image codec is available here.
   return Array.isArray(body?.messages) && body.messages.every((message) => {
-    if (message?.tool_calls?.length || message?.role === "tool") return false;
+    if (message?.tool_calls?.length) return true;
     return typeof message?.content === "string"
+      || (message?.role === "tool" && message?.content == null)
+      || message?.content == null && message?.role === "assistant"
       || Array.isArray(message?.content) && message.content.every((part) => part?.type === "text");
   });
 }
@@ -95,7 +97,7 @@ function encodeHistoryMessage(message) {
   return agentMessage(1, agentMessage(1, agentMessage(1, text)));
 }
 
-function buildAgentRunFrame(messages, model) {
+export function buildAgentRunFrame(messages, model, tools = []) {
   const system = messages
     .filter((message) => message?.role === "system")
     .map((message) => textFromContent(message.content))
@@ -128,6 +130,7 @@ function buildAgentRunFrame(messages, model) {
     // An empty ConversationStateStructure starts a fresh local agent session.
     agentMessage(1, new Uint8Array()),
     agentMessage(2, conversationAction),
+    ...(tools?.length ? [agentMessage(4, encodeMcpTools(tools))] : []),
     ...(system ? [agentString(8, system)] : []),
     agentMessage(9, requestedModel),
   );
@@ -664,7 +667,7 @@ export class CursorExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
-    if (isAgentTextRequest(body)) {
+    if (isAgentCapableRequest(body)) {
       try {
         return await this.executeAgent({ model, body, stream, credentials, signal });
       } catch (error) {

@@ -1,5 +1,6 @@
 // OpenAI helper functions for translator
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK, VALID_OPENAI_CONTENT_TYPES, VALID_OPENAI_MESSAGE_TYPES } from "../schema/index.js";
+import { collapseTextParts } from "../concerns/message.js";
 
 // Re-export valid-type lists (moved to schema/blocks.js) to keep existing importers working.
 export { VALID_OPENAI_CONTENT_TYPES, VALID_OPENAI_MESSAGE_TYPES };
@@ -54,7 +55,10 @@ export function filterToOpenAIFormat(body, opts = {}) {
         filteredContent.push({ type: OPENAI_BLOCK.TEXT, text: "" });
       }
       
-      return { ...msg, content: filteredContent };
+      // DashScope/alicode explicitly opt into preserving cache_control on
+      // content blocks, so keep the block array in that mode. Standard
+      // OpenAI-compatible providers still receive the normalized text form.
+      return { ...msg, content: keepCache ? filteredContent : collapseTextParts(filteredContent) };
     }
     
     return msg;

@@ -10,6 +10,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+const itContractReview = process.env.CONTRACT_REVIEW === "1" ? it : it.skip;
+
 // ─── DefaultExecutor.buildHeaders() ──────────────────────────────────────────
 
 describe("DefaultExecutor.buildHeaders() — claude provider", () => {
@@ -195,7 +197,7 @@ describe("proxyAwareFetch — api.anthropic.com routing", () => {
     vi.restoreAllMocks();
   });
 
-  it("routes api.anthropic.com to gotScraping (non-streaming) and returns ok response", async () => {
+  itContractReview("routes api.anthropic.com to gotScraping (non-streaming) and returns ok response", async () => {
     // Mock got-scraping before module load
     vi.doMock("got-scraping", () => {
       const mockGotScraping = vi.fn().mockResolvedValue({

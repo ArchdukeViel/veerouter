@@ -76,9 +76,14 @@ function pythonCandidates() {
   const list = [];
   const bin = findHeadroomBinary();
   if (bin) {
-    const dir = path.dirname(bin);
-    const names = IS_WIN ? ["python.exe", "python3.exe"] : ["python3", "python3.13", "python"];
-    for (const n of names) list.push(path.join(dir, n));
+    // Use the path flavor returned by the command, not only the host process
+    // platform. This keeps mocked/remote POSIX paths intact on Windows and
+    // handles WSL-style `which` output without producing mixed separators.
+    const isWindowsBinaryPath = /^[A-Za-z]:[\\/]/.test(bin) || bin.includes("\\");
+    const pathImpl = isWindowsBinaryPath ? path.win32 : path.posix;
+    const dir = pathImpl.dirname(bin);
+    const names = isWindowsBinaryPath ? ["python.exe", "python3.exe"] : ["python3", "python3.13", "python"];
+    for (const n of names) list.push(pathImpl.join(dir, n));
   }
   for (const dir of EXTRA_BINS) {
     if (!dir) continue;

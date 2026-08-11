@@ -6,14 +6,18 @@ import { toOpenAIUsage } from "../concerns/usage.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
 import { encodeDataUri } from "../concerns/image.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
+import { readGeminiFunctionCallSignature, attachOpenAIToolCallSignature } from "../concerns/thoughtSignature.js";
 
 // Build chunk meta for current gemini state
 function chunkMeta(state) {
   return { id: `chatcmpl-${state.messageId}`, created: Math.floor(Date.now() / 1000), model: state.model };
 }
 
-// Build a tool_call chunk from a gemini functionCall part (shared by sig/non-sig branches)
-function emitFunctionCall(functionCall, state) {
+// Build a tool_call chunk from a gemini functionCall part (shared by sig/non-sig branches).
+// `signature` is the real thoughtSignature Google returned for this functionCall
+// part (null when the part has none — Gemini 3 attaches a signature to the
+// FIRST parallel functionCall only; subsequent parallel calls carry none).
+function emitFunctionCall(functionCall, signature, state) {
   const rawName = functionCall.name;
   // Restore original tool name from mapping (AG cloaking)
   const fcName = state.toolNameMap?.get(rawName) || rawName;
@@ -36,6 +40,10 @@ function emitFunctionCall(functionCall, state) {
     type: OPENAI_BLOCK.FUNCTION,
     function: { name: fcName, arguments: JSON.stringify(fcArgs) },
   };
+  // Preserve Gemini's thoughtSignature on the tool_call so the client replays
+  // it back in the next turn (Gemini 3 rejects tool_calls without it on the
+  // first functionCall per turn). See concerns/thoughtSignature.js.
+  if (signature) attachOpenAIToolCallSignature(toolCall, signature);
   // Keep Gemini bookkeeping separate from the shared translator state.toolCalls map.
   // The downstream OpenAI→Claude translator uses state.toolCalls for Claude block
   // metadata; pre-populating it here makes Anthropic tool deltas lose index.
@@ -99,11 +107,11 @@ export function geminiToOpenAIResponse(chunk, state) {
   // Process parts
   if (content?.parts) {
     for (const part of content.parts) {
-      const hasThoughtSig = part.thoughtSignature || part.thought_signature;
+      const partSignature = readGeminiFunctionCallSignature(part);
       const isThought = part.thought === true;
 
       // Handle thought signature (thinking mode)
-      if (hasThoughtSig) {
+      if (partSignature) {
         const hasTextContent = part.text !== undefined && part.text !== "";
         const hasFunctionCall = !!part.functionCall;
 
@@ -116,7 +124,7 @@ export function geminiToOpenAIResponse(chunk, state) {
         }
 
         if (hasFunctionCall) {
-          results.push(emitFunctionCall(part.functionCall, state));
+          results.push(emitFunctionCall(part.functionCall, partSignature, state));
         }
         continue;
       }
@@ -133,9 +141,12 @@ export function geminiToOpenAIResponse(chunk, state) {
         ));
       }
 
-      // Function call
+      // Function call. Google only attaches a thoughtSignature to the FIRST
+      // parallel functionCall part; sibling parallel parts arrive here with
+      // no signature and are emitted verbatim — the upstream payload shape
+      // must not be altered (per Gemini tool-state rules).
       if (part.functionCall) {
-        results.push(emitFunctionCall(part.functionCall, state));
+        results.push(emitFunctionCall(part.functionCall, partSignature, state));
       }
 
       // Inline data (images)

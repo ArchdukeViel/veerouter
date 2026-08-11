@@ -82,7 +82,23 @@ if (cliMode) {
     errors.push(`CLI static assets are missing; checked: ${staticAssetCandidates.join(", ")}`);
   }
 
-  const command = process.platform === "win32" ? "9router.cmd" : "9router";
+  const commandName = process.platform === "win32" ? "9router.cmd" : "9router";
+  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+  const prefixResult = spawnSync(npmCommand, ["prefix", "-g"], {
+    cwd: rootDir,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+    windowsHide: true,
+  });
+  const globalPrefix = prefixResult.status === 0
+    ? `${prefixResult.stdout || ""}`.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop()
+    : null;
+  const globalCommandCandidates = process.platform === "win32"
+    ? [globalPrefix && path.join(globalPrefix, commandName), commandName]
+    : [globalPrefix && path.join(globalPrefix, "bin", commandName), globalPrefix && path.join(globalPrefix, commandName), commandName];
+  const command = globalCommandCandidates.find((candidate) =>
+    candidate && (!path.isAbsolute(candidate) || fs.existsSync(candidate))
+  ) || commandName;
   const result = spawnSync(command, ["--version"], {
     cwd: rootDir,
     encoding: "utf8",
@@ -91,7 +107,7 @@ if (cliMode) {
   });
   const version = `${result.stdout || ""}${result.stderr || ""}`.trim();
   if (result.status !== 0) {
-    errors.push(`global ${command} --version failed: ${version || "no output"}`);
+    errors.push(`global ${commandName} --version failed (${command}): ${version || "no output"}`);
   } else if (version !== cliPackage.version) {
     errors.push(`global CLI version ${version} does not match local ${cliPackage.version}`);
   } else {

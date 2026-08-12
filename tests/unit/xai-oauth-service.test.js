@@ -1,10 +1,20 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// OAuth URL/token tests own fetch completely. Do not let the production
+// open-sse entrypoint replace it with its proxy-aware global wrapper when the
+// full offline suite has already loaded that module in the same worker.
+vi.mock("open-sse/index.js", () => ({}));
 
 describe("xai/oauth service", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
     vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("validates discovered endpoints are https x.ai URLs", async () => {

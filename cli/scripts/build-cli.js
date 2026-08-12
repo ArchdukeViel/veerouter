@@ -50,6 +50,36 @@ function shouldExclude(name) {
   });
 }
 
+function getDirectorySizeBytes(dir) {
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        total += getDirectorySizeBytes(entryPath);
+      } else if (entry.isFile()) {
+        total += fs.statSync(entryPath).size;
+      }
+    } catch {
+      // A concurrently removed or inaccessible build artifact should not make
+      // the informational package-size report fail the build.
+    }
+  }
+  return total;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = -1;
+  do {
+    value /= 1024;
+    unitIndex += 1;
+  } while (value >= 1024 && unitIndex < units.length - 1);
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
 function copyRecursive(src, dest) {
   if (!fs.existsSync(src)) {
     console.warn(`Warning: Source ${src} does not exist`);
@@ -351,9 +381,7 @@ function buildCliPackage() {
   console.log(`📁 Output: ${cliAppDir}`);
 
   try {
-    const { execSync: exec } = require("child_process");
-    const size = exec(`du -sh "${cliAppDir}"`, { encoding: "utf8" }).trim();
-    console.log(`📊 Package size: ${size.split("\t")[0]}`);
+    console.log(`📊 Package size: ${formatBytes(getDirectorySizeBytes(cliAppDir))}`);
   } catch (e) {
     // Silent fail on size check
   }

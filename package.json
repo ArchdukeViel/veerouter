@@ -10,6 +10,7 @@
     "test:live": "node scripts/run-live-tests.mjs",
     "verify:install": "node scripts/verify-install.mjs",
     "verify:cli": "node scripts/verify-install.mjs --cli",
+    "verify:health": "node scripts/verify-health.mjs",
     "lint": "eslint open-sse src/app/api src/lib src/models scripts tests",
     "dev": "next dev --port 20127",
     "dev:webpack": "next dev --webpack --port 20127",

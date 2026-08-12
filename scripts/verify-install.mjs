@@ -24,6 +24,34 @@ function report(label, value) {
   console.log(`[verify-install] ${label}: ${value}`);
 }
 
+function quoteWindowsArg(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9_./:\\-]+$/.test(text)) return text;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function getSpawnInvocation(command, args) {
+  if (process.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(command)) {
+    return { command, args };
+  }
+
+  // .cmd/.bat files are shell entrypoints on Windows. Invoke cmd.exe
+  // explicitly so Node never has to use the deprecated shell:true option.
+  const commandLine = [command, ...args].map(quoteWindowsArg).join(" ");
+  return {
+    command: process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", commandLine],
+  };
+}
+
+function runCommand(command, args, options = {}) {
+  const invocation = getSpawnInvocation(command, args);
+  return spawnSync(invocation.command, invocation.args, {
+    ...options,
+    shell: false,
+  });
+}
+
 const rootPackage = readJson(path.join(rootDir, "package.json"));
 const allowScripts = rootPackage.allowScripts || {};
 for (const packageKey of ["better-sqlite3@12.11.1", "unrs-resolver@1.12.2"]) {
@@ -74,6 +102,23 @@ if (cliMode) {
   ];
   for (const [filePath, label] of cliArtifacts) requireFile(filePath, label);
 
+  const builtAppPackagePath = path.join(cliDir, "app", "package.json");
+  requireFile(builtAppPackagePath, "CLI built package metadata");
+  if (fs.existsSync(builtAppPackagePath)) {
+    try {
+      const builtAppPackage = readJson(builtAppPackagePath);
+      if (builtAppPackage.version !== cliPackage.version) {
+        errors.push(
+          `CLI built package version ${builtAppPackage.version || "unknown"} does not match ${cliPackage.version}`,
+        );
+      } else {
+        report("CLI built package", `${builtAppPackage.version} matches`);
+      }
+    } catch (error) {
+      errors.push(`CLI built package metadata is invalid: ${error.message}`);
+    }
+  }
+
   const staticAssetCandidates = [
     path.join(cliDir, "app", ".next-cli-build", "static"),
     path.join(cliDir, "app", ".next", "static"),
@@ -89,10 +134,9 @@ if (cliMode) {
     return matches?.at(-1) || null;
   };
   const readNpmValue = (args) => {
-    const result = spawnSync(npmCommand, args, {
+    const result = runCommand(npmCommand, args, {
       cwd: rootDir,
       encoding: "utf8",
-      shell: process.platform === "win32",
       windowsHide: true,
     });
     if (result.status !== 0) return null;
@@ -153,17 +197,15 @@ if (cliMode) {
   invocations.push({
     command: npmCommand,
     args: ["exec", "--global", "--offline", "--", cliPackage.name, "--version"],
-    shell: process.platform === "win32",
     label: "npm exec --global",
   });
 
   const failures = [];
   let verified = false;
   for (const invocation of invocations) {
-    const result = spawnSync(invocation.command, invocation.args, {
+    const result = runCommand(invocation.command, invocation.args, {
       cwd: rootDir,
       encoding: "utf8",
-      shell: invocation.shell,
       windowsHide: true,
     });
     const output = `${result.stdout || ""}${result.stderr || ""}`.trim();

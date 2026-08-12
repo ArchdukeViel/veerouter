@@ -7,6 +7,20 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// This suite exercises the scheduler contract, not the provider-refresh
+// registry. Keep the first dynamic import small and deterministic; the real
+// helper implementations are covered by their own token-refresh suites.
+vi.mock("open-sse/services/tokenRefresh.js", () => ({
+  getRefreshLeadMs: () => 0,
+}));
+vi.mock("open-sse/services/oauthCredentialManager.js", () => ({
+  getCredentialExpiryMs: (connection) => {
+    const value = connection?.expiresAt;
+    const parsed = typeof value === "number" ? value : Date.parse(value || "");
+    return Number.isFinite(parsed) ? parsed : null;
+  },
+}));
+
 const NOW = Date.parse("2026-08-01T12:00:00.000Z");
 
 function conn(overrides = {}) {

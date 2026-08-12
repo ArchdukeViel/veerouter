@@ -4,6 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // open-sse entrypoint replace it with its proxy-aware global wrapper when the
 // full offline suite has already loaded that module in the same worker.
 vi.mock("open-sse/index.js", () => ({}));
+// The xAI OAuth contract only needs the canonical xAI client id. Avoid loading
+// the full provider registry during the first dynamic import in this isolated
+// unit suite; the registry has its own coverage elsewhere.
+vi.mock("open-sse/providers/index.js", () => ({
+  PROVIDERS: {
+    xai: { clientId: "b1a00492-073a-47ea-816f-4c329264a828" },
+  },
+  PROVIDER_OAUTH: {},
+}));
 
 describe("xai/oauth service", () => {
   beforeEach(() => {

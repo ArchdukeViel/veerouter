@@ -80,6 +80,17 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+function withoutObsoleteNpmConfig(env) {
+  const cleanEnv = { ...env };
+  for (const key of Object.keys(cleanEnv)) {
+    const normalized = key.toLowerCase();
+    if (normalized === "npm_config_allow_scripts" || normalized === "npm_config_global_ignore_file") {
+      delete cleanEnv[key];
+    }
+  }
+  return cleanEnv;
+}
+
 function copyRecursive(src, dest) {
   if (!fs.existsSync(src)) {
     console.warn(`Warning: Source ${src} does not exist`);
@@ -221,7 +232,7 @@ function buildCliPackage() {
       stdio: "inherit",
       cwd: appDir,
       env: {
-        ...process.env,
+        ...withoutObsoleteNpmConfig(process.env),
         HOME: buildHomeDir,
         USERPROFILE: buildHomeDir,
         APPDATA: path.join(buildHomeDir, "AppData", "Roaming"),

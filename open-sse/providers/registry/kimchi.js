@@ -14,7 +14,7 @@ const defaultExport = {
     },
   },
   category: "freeTier",
-  authModes: ["oauth"],
+  authModes: ["oauth", "apikey"],
   hasOAuth: true,
   transport: {
     baseUrl: "https://llm.kimchi.dev/openai/v1/chat/completions",

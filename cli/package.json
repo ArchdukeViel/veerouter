@@ -1,6 +1,6 @@
 {
   "name": "9router",
-  "version": "5.5.1",
+  "version": "5.5.2",
   "description": "9Router CLI - Start and manage 9Router server",
   "bin": {
     "9router": "./cli.js"
@@ -48,7 +48,7 @@
   },
   "allowScripts": {
     "9router": true,
-    "9router@5.5.1": true,
+    "9router@5.5.2": true,
     "esbuild@0.25.12": true
   }
 }

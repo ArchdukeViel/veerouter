@@ -15,7 +15,7 @@
 // authType is "apikey" rather than "none" so the connection carries a
 // credentials record — which is where providerSpecificData.baseUrl lives. Local
 // servers ignore the key itself; any non-empty value works.
-export default {
+const defaultExport = {
   id: "selfhosted-stt",
   priority: 50,
   hasFree: true,
@@ -46,3 +46,4 @@ export default {
     format: "openai",
   },
 };
+export default defaultExport;

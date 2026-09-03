@@ -61,7 +61,7 @@ describe("Codex Refresh Token", () => {
           }),
         })
       );
-    });
+    }, 15_000);
 
     it("should keep old refresh_token when server does not return new one", async () => {
       mockFetchWithJson({
@@ -97,7 +97,7 @@ describe("Codex Refresh Token", () => {
       expect(result.idToken).toBe("old-id-token");
       expect(result.lastRefreshAt).toBeTruthy();
       expect(result.expiresAt).toBeTruthy();
-    });
+    }, 15_000);
 
     it("should refresh Codex when lastRefreshAt is older than the upstream stale window", async () => {
       const { CodexExecutor } = await import("../../open-sse/executors/codex.js");

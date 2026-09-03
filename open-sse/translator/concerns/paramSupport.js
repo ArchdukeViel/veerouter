@@ -3,8 +3,9 @@ import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 // Strip request params a given provider/model rejects upstream (e.g. HTTP 400).
 // Config-driven: add a rule instead of scattering `delete body.x` across executors.
 
-// Each rule: optional provider, regex match on model, list of params to drop.
-// A param is removed only when it is present (!== undefined).
+// Each rule: optional provider, regex match on model, list of params to drop,
+// and/or fixed parameter values to set after drops. A param is removed only
+// when it is present (!== undefined).
 const STRIP_RULES = [
   // All Claude models: temperature deprecated/rejected upstream (Anthropic 400). #1748
   { match: /claude/i, drop: ["temperature"] },
@@ -21,6 +22,9 @@ const STRIP_RULES = [
   // "integer above maximum value, expected <= 32768". Pin an explicit endpoint cap;
   // min() with the model ceiling still applies if a variant's own limit is lower.
   { provider: "volcengine-ark", match: /kimi/i, maxOutputCap: 32768, clampToModelMaxOutput: true },
+  // NVIDIA NIM Kimi K3 exposes an immutable sampling setting. VS Code sends
+  // top_p=1 by default, but NIM only accepts 0.95 for this model.
+  { provider: "nvidia", match: /^moonshotai\/kimi-k3$/i, set: { top_p: 0.95 } },
 ];
 
 // Test a rule's match (regex or predicate) against the model id.
@@ -43,6 +47,9 @@ export function stripUnsupportedParams(provider, model, body) {
     if (!matches(rule, model)) continue;
     for (const key of rule.drop || []) {
       if (body[key] !== undefined) delete body[key];
+    }
+    for (const [key, value] of Object.entries(rule.set || {})) {
+      body[key] = value;
     }
     // CF Workers AI oneOf root schema only accepts content as plain string (#1926)
     if (rule.flattenContent && Array.isArray(body.messages)) {

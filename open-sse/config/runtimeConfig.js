@@ -58,6 +58,11 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
+// Dashboard/model connectivity probe timeout. Reasoning models may spend more
+// than 15 seconds in prompt prefill before returning a non-streaming response.
+// Env: MODEL_TEST_TIMEOUT_MS.
+export const MODEL_TEST_TIMEOUT_MS = envMs("MODEL_TEST_TIMEOUT_MS", 60 * 1000);
+
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
 

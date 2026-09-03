@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import { getProviderModels } from "../../open-sse/config/providerModels.js";
 
 describe("getCapabilitiesForModel", () => {
   const claudeSonnet5Expected = {
@@ -61,5 +62,70 @@ describe("getCapabilitiesForModel", () => {
     expect(getCapabilitiesForModel("kiro", "gpt-5.6-terra-thinking")).toMatchObject(kiroGpt56Expected);
     expect(getCapabilitiesForModel("kiro", "gpt-5.6-luna-agentic")).toMatchObject(kiroGpt56Expected);
     expect(getCapabilitiesForModel("kiro", "gpt-5.6-sol-thinking-agentic")).toMatchObject(kiroGpt56Expected);
+  });
+});
+
+describe("Gemini 3.x capability pattern (regression for *gemini-3.6* addition)", () => {
+  // Locks in the new *gemini-3.6* PATTERN_CAPABILITIES entry added in
+  // fix/gemini-3.6-capabilities. The literal name "gemini-3.6" is a
+  // defensive pre-recognition; the actual registered model ids end in
+  // "-flash" / "-flash-high" / "-flash-medium" / "-flash-low" and would
+  // also match the broader *gemini-3* pattern. The new pattern must
+  // match the literal name anyway so a future "gemini-3.6" id (no
+  // suffix) is classified as a Gemini-3-class multimodal model.
+  it("matches the literal gemini-3.6 model id with full multimodal caps", () => {
+    const caps = getCapabilitiesForModel("antigravity", "gemini-3.6");
+    expect(caps.contextWindow).toBe(1048576);
+    expect(caps.maxOutput).toBe(65536);
+    expect(caps.vision).toBe(true);
+    expect(caps.audioInput).toBe(true);
+    expect(caps.videoInput).toBe(true);
+    expect(caps.reasoning).toBe(true);
+    expect(caps.search).toBe(true);
+    expect(caps.thinkingFormat).toBe("gemini-level");
+    expect(caps.thinkingCanDisable).toBe(false);
+  });
+
+  it("matches gemini-3.6-flash and tiered variants (provider-prefixed too)", () => {
+    for (const model of [
+      "gemini-3.6-flash",
+      "gemini-3.6-flash-high",
+      "gemini-3.6-flash-medium",
+      "gemini-3.6-flash-low",
+      "google/gemini-3.6-flash",
+    ]) {
+      const caps = getCapabilitiesForModel("antigravity", model);
+      expect(caps.contextWindow, model).toBe(1048576);
+      expect(caps.maxOutput, model).toBe(65536);
+      expect(caps.thinkingFormat, model).toBe("gemini-level");
+    }
+  });
+});
+
+describe("NVIDIA NIM model metadata", () => {
+  it("lists the tested Kimi K3 and versioned DeepSeek V4 Flash models", () => {
+    const ids = getProviderModels("nvidia").map((model) => model.id);
+
+    expect(ids).toContain("moonshotai/kimi-k3");
+    expect(ids).toContain("deepseek-ai/deepseek-v4-flash-0731");
+  });
+
+  it("uses NVIDIA's OpenAI reasoning wire format for Kimi K3", () => {
+    expect(getCapabilitiesForModel("nvidia", "moonshotai/kimi-k3")).toMatchObject({
+      reasoning: true,
+      thinkingFormat: "openai",
+      thinkingCanDisable: false,
+      contextWindow: 1048576,
+      maxOutput: 131072,
+    });
+  });
+
+  it("uses NVIDIA's OpenAI reasoning wire format for DeepSeek V4 Flash 0731", () => {
+    expect(getCapabilitiesForModel("nvidia", "deepseek-ai/deepseek-v4-flash-0731")).toMatchObject({
+      reasoning: true,
+      thinkingFormat: "openai",
+      contextWindow: 1000000,
+      maxOutput: 65536,
+    });
   });
 });

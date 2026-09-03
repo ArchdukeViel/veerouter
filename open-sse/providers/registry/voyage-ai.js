@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "voyage-ai",
   priority: 40,
   alias: "voyage-ai",
@@ -28,3 +28,4 @@ export default {
   serviceKinds: ["embedding"],
   embeddingConfig: { baseUrl: "https://api.voyageai.com/v1/embeddings" },
 };
+export default defaultExport;

@@ -4,6 +4,7 @@ import { getProviderModels, PROVIDER_ID_TO_ALIAS } from "open-sse/config/provide
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { pingModelByKind } from "@/app/api/models/test/ping";
+import { MODEL_TEST_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 
 /**
  * POST /api/providers/[id]/test-models
@@ -45,13 +46,13 @@ export async function POST(request, { params }) {
     // This prevents race condition where multiple requests concurrently refresh the same token.
     const [first, ...rest] = models;
     const firstKind = first.kind || first.type || "llm";
-    const firstResult = await pingModelByKind(`${alias}/${first.id}`, firstKind, baseUrl);
+    const firstResult = await pingModelByKind(`${alias}/${first.id}`, firstKind, baseUrl, request.signal);
     const results = [{ modelId: first.id, name: first.name || first.id, ...firstResult }];
 
     if (rest.length > 0) {
       const restResults = await Promise.all(
         rest.map(async (model) => {
-          const result = await pingModelByKind(`${alias}/${model.id}`, model.kind || model.type || "llm", baseUrl);
+          const result = await pingModelByKind(`${alias}/${model.id}`, model.kind || model.type || "llm", baseUrl, request.signal);
           return { modelId: model.id, name: model.name || model.id, ...result };
         })
       );
@@ -61,6 +62,12 @@ export async function POST(request, { params }) {
     return NextResponse.json({ provider: providerId, connectionId: id, results });
   } catch (error) {
     console.log("Error testing models:", error);
-    return NextResponse.json({ error: "Test failed" }, { status: 500 });
+    const timedOut = error?.name === "TimeoutError";
+    const cancelled = error?.name === "AbortError" || request.signal?.aborted;
+    const status = timedOut ? 504 : (cancelled ? 499 : 500);
+    const message = timedOut
+      ? `Model test timed out after ${MODEL_TEST_TIMEOUT_MS}ms`
+      : (cancelled ? "Model test cancelled" : "Test failed");
+    return NextResponse.json({ error: message }, { status });
   }
 }

@@ -92,6 +92,27 @@ describe("handleChatCore Headroom diagnostics", () => {
     );
   });
 
+  it("initializes the chat-core context after creating the stream controller", async () => {
+    const chatCoreCtx = {};
+
+    await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "hello" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      connectionId: "test-conn",
+      clientRawRequest: { endpoint: "/v1/chat/completions", body: {}, headers: { accept: "application/json" } },
+      chatCoreCtx,
+      rtkEnabled: false,
+      headroomEnabled: false,
+      cavemanEnabled: false,
+      ponytailEnabled: false,
+    });
+
+    expect(chatCoreCtx.translatedBody).toBeDefined();
+    expect(chatCoreCtx.streamControllerSignal).toBeInstanceOf(AbortSignal);
+  });
+
   it("scrubs credentials and query strings from Headroom fetch errors", async () => {
     const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
 

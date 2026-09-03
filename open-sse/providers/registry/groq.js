@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "groq",
   priority: 60,
   hasFree: true,
@@ -45,3 +45,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

@@ -12,6 +12,21 @@ const buildHomeDir = path.join(cliDir, ".build-home");
 const buildDistDirName = ".next-cli-build";
 const buildDistDir = path.join(appDir, buildDistDirName);
 
+function getBuildIdentity() {
+  let sha = "unknown";
+  let dirty = false;
+  try {
+    sha = execSync("git rev-parse HEAD", { cwd: appDir, encoding: "utf8" }).trim() || sha;
+    dirty = !!execSync("git status --porcelain --untracked-files=all", { cwd: appDir, encoding: "utf8" }).trim();
+  } catch {
+    // Source archives without .git still get a timestamped unknown build.
+  }
+  return {
+    sha: dirty && sha !== "unknown" ? `${sha}-dirty` : sha,
+    builtAt: new Date().toISOString(),
+  };
+}
+
 // Exclude patterns for files/folders we don't want to copy
 const EXCLUDE_PATTERNS = [
   "@img",           // Sharp image processing (not needed with unoptimized images)
@@ -33,6 +48,47 @@ function shouldExclude(name) {
     }
     return name === pattern;
   });
+}
+
+function getDirectorySizeBytes(dir) {
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        total += getDirectorySizeBytes(entryPath);
+      } else if (entry.isFile()) {
+        total += fs.statSync(entryPath).size;
+      }
+    } catch {
+      // A concurrently removed or inaccessible build artifact should not make
+      // the informational package-size report fail the build.
+    }
+  }
+  return total;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = -1;
+  do {
+    value /= 1024;
+    unitIndex += 1;
+  } while (value >= 1024 && unitIndex < units.length - 1);
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function withoutObsoleteNpmConfig(env) {
+  const cleanEnv = { ...env };
+  for (const key of Object.keys(cleanEnv)) {
+    const normalized = key.toLowerCase();
+    if (normalized === "npm_config_allow_scripts" || normalized === "npm_config_global_ignore_file") {
+      delete cleanEnv[key];
+    }
+  }
+  return cleanEnv;
 }
 
 function copyRecursive(src, dest) {
@@ -150,6 +206,7 @@ function assertRequiredApiArtifacts(cliAppDir) {
 
 function buildCliPackage() {
   console.log("📦 Building 9Router CLI package with Next.js...\n");
+  const buildIdentity = getBuildIdentity();
 
   fs.mkdirSync(buildHomeDir, { recursive: true });
   fs.mkdirSync(path.join(buildHomeDir, "AppData", "Roaming"), { recursive: true });
@@ -175,13 +232,15 @@ function buildCliPackage() {
       stdio: "inherit",
       cwd: appDir,
       env: {
-        ...process.env,
+        ...withoutObsoleteNpmConfig(process.env),
         HOME: buildHomeDir,
         USERPROFILE: buildHomeDir,
         APPDATA: path.join(buildHomeDir, "AppData", "Roaming"),
         LOCALAPPDATA: path.join(buildHomeDir, "AppData", "Local"),
         NEXT_DIST_DIR: buildDistDirName,
         NEXT_TRACING_ROOT_MODE: "workspace",
+        NINEROUTER_BUILD_SHA: buildIdentity.sha,
+        NINEROUTER_BUILD_TIME: buildIdentity.builtAt,
       }
     });
     console.log("✅ Next.js build completed\n");
@@ -335,9 +394,7 @@ function buildCliPackage() {
   console.log(`📁 Output: ${cliAppDir}`);
 
   try {
-    const { execSync: exec } = require("child_process");
-    const size = exec(`du -sh "${cliAppDir}"`, { encoding: "utf8" }).trim();
-    console.log(`📊 Package size: ${size.split("\t")[0]}`);
+    console.log(`📊 Package size: ${formatBytes(getDirectorySizeBytes(cliAppDir))}`);
   } catch (e) {
     // Silent fail on size check
   }

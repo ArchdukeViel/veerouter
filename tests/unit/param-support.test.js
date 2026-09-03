@@ -29,6 +29,22 @@ describe("stripUnsupportedParams", () => {
     expect(body).toEqual({ top_p: 1 });
   });
 
+  it("pins NVIDIA NIM Kimi K3 top_p to the model's immutable value", () => {
+    const body = { top_p: 1 };
+
+    stripUnsupportedParams("nvidia", "moonshotai/kimi-k3", body);
+
+    expect(body.top_p).toBe(0.95);
+  });
+
+  it("does not apply the Kimi K3 sampling override to another provider", () => {
+    const body = { top_p: 1 };
+
+    stripUnsupportedParams("openrouter", "moonshotai/kimi-k3", body);
+
+    expect(body.top_p).toBe(1);
+  });
+
   it("clamps VolcEngine Ark GLM max token fields to the model output ceiling", () => {
     const body = {
       max_tokens: 131072,

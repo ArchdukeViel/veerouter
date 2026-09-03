@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "github",
   priority: 40,
   alias: "gh",
@@ -89,3 +89,4 @@ export default {
     usage: true,
   },
 };
+export default defaultExport;

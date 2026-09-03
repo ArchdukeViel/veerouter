@@ -1,6 +1,7 @@
 import { getApiKeys } from "@/lib/localDb";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { MODEL_TEST_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 
 const CLI_TOKEN_SALT = "9r-cli-auth";
 
@@ -50,16 +51,23 @@ async function getInternalHeaders() {
   return headers;
 }
 
-export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`) {
+function createProbeSignal(requestSignal) {
+  const timeoutSignal = AbortSignal.timeout(MODEL_TEST_TIMEOUT_MS);
+  if (!requestSignal || typeof requestSignal.aborted !== "boolean") return timeoutSignal;
+  return AbortSignal.any([requestSignal, timeoutSignal]);
+}
+
+export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`, requestSignal = null) {
   const headers = await getInternalHeaders();
   const start = Date.now();
+  const probeSignal = createProbeSignal(requestSignal);
 
   if (kind === "embedding") {
     const res = await fetch(`${baseUrl}/api/v1/embeddings`, {
       method: "POST",
       headers,
       body: JSON.stringify({ model, input: "test" }),
-      signal: AbortSignal.timeout(15000),
+      signal: probeSignal,
     });
     const latencyMs = Date.now() - start;
     const rawText = await res.text().catch(() => "");
@@ -82,7 +90,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
       method: "POST",
       headers,
       body: JSON.stringify({ model, prompt: "test" }),
-      signal: AbortSignal.timeout(15000),
+      signal: probeSignal,
     });
     const latencyMs = Date.now() - start;
     const rawText = await res.text().catch(() => "");
@@ -111,7 +119,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
       method: "POST",
       headers: Object.fromEntries(Object.entries(headers).filter(([key]) => key.toLowerCase() !== "content-type")),
       body: form,
-      signal: AbortSignal.timeout(15000),
+      signal: probeSignal,
     });
     const latencyMs = Date.now() - start;
     const rawText = await res.text().catch(() => "");
@@ -143,7 +151,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
       stream: false,
       messages: [{ role: "user", content: "hi" }],
     }),
-    signal: AbortSignal.timeout(15000),
+    signal: probeSignal,
   });
   const latencyMs = Date.now() - start;
 
@@ -187,11 +195,12 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
   // chain-of-thought and return finish_reason:"length" with empty content but
   // non-empty reasoning/thinking. That's a successful connection, not a failure.
   const firstChoice = parsed?.choices?.[0] || {};
-  const hasReasoning =
+  const reasoning =
     firstChoice.message?.reasoning ||
     firstChoice.message?.reasoning_content ||
     firstChoice.message?.thinking ||
     firstChoice.message?.thinking_content;
+  const hasReasoning = typeof reasoning === "string" ? reasoning.trim().length > 0 : Boolean(reasoning);
   const contentEmpty = !String(firstChoice.message?.content || "").trim();
   if (hasChoices && firstChoice.finish_reason === "length" && contentEmpty && hasReasoning) {
     return { ok: true, latencyMs, error: null, status: res.status, note: "reasoning-only response (length-limited)" };
@@ -206,5 +215,19 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     };
   }
 
-  return { ok: true, latencyMs, error: null, status: res.status };
+  const hasToolCalls = Array.isArray(firstChoice.message?.tool_calls) && firstChoice.message.tool_calls.length > 0;
+  if ((!contentEmpty && !hasReasoning) || hasToolCalls) {
+    return { ok: true, latencyMs, error: null, status: res.status };
+  }
+
+  if (hasReasoning) {
+    return { ok: true, latencyMs, error: null, status: res.status, note: "reasoning-only response" };
+  }
+
+  return {
+    ok: false,
+    latencyMs,
+    status: res.status,
+    error: "Provider returned an empty completion choice",
+  };
 }

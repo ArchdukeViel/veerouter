@@ -2,7 +2,7 @@
 // Chat = Codeium gRPC-web protobuf:
 //   POST {base}  Content-Type: application/grpc-web+proto
 //   Service: exa.language_server_pb.LanguageServerService / GetChatMessage
-export default {
+const defaultExport = {
   id: "windsurf",
   alias: "ws",
   uiAlias: "ws",
@@ -141,3 +141,4 @@ export default {
     { id: "glm-5.1", name: "GLM-5.1" },
   ],
 };
+export default defaultExport;

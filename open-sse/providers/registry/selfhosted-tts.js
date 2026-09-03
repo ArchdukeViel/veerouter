@@ -9,7 +9,7 @@
 // `authType: "apikey"` is what makes the override possible at all: it gives the
 // connection a credentials record, which is where providerSpecificData.baseUrl
 // lives. Local servers ignore the key; any non-empty value works.
-export default {
+const defaultExport = {
   id: "selfhosted-tts",
   priority: 50,
   hasFree: true,
@@ -42,3 +42,4 @@ export default {
     format: "openai-speech",
   },
 };
+export default defaultExport;

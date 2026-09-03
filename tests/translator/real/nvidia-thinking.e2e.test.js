@@ -13,7 +13,9 @@ const MODELS = [
   "nvidia/z-ai/glm-5.2",
   "nvidia/deepseek-ai/deepseek-v4-pro",
   "nvidia/deepseek-ai/deepseek-v4-flash",
+  "nvidia/deepseek-ai/deepseek-v4-flash-0731",
   "nvidia/moonshotai/kimi-k2.6",
+  "nvidia/moonshotai/kimi-k3",
   "nvidia/nvidia/nemotron-3-ultra-550b-a55b",
 ];
 const RUN = process.env.RUN_E2E === "1";
@@ -48,6 +50,7 @@ maybe("nvidia thinking e2e", () => {
         stream: true,
         max_tokens: 64,
         reasoning_effort: "low",
+        ...(model === "nvidia/moonshotai/kimi-k3" ? { top_p: 1 } : {}),
         messages: [{ role: "user", content: "Reply with the single word: hi" }],
       }),
     });

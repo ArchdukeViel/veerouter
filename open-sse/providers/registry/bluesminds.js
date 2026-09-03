@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "bluesminds",
   alias: "bm",
   aliases: ["blue-sminds"],
@@ -36,3 +36,4 @@ export default {
     { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (VIP)", contextLength: 1048576 },
   ],
 };
+export default defaultExport;

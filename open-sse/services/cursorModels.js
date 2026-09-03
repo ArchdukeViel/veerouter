@@ -128,7 +128,7 @@ function http2PostProto(url, headers, body, signal, timeoutMs) {
   });
 }
 
-async function fetchCursorCatalog(credentials, signal) {
+async function fetchCursorCatalog(credentials, signal, transport = http2PostProto) {
   const accessToken = credentials?.accessToken;
   const machineId = credentials?.providerSpecificData?.machineId;
   const url = getCursorModelsUrl();
@@ -144,7 +144,7 @@ async function fetchCursorCatalog(credentials, signal) {
   delete headers["connect-accept-encoding"];
   delete headers["connect-protocol-version"];
 
-  const response = await http2PostProto(url, headers, new Uint8Array(), signal, FETCH_TIMEOUT_MS);
+  const response = await transport(url, headers, new Uint8Array(), signal, FETCH_TIMEOUT_MS);
   if (response.status !== 200) {
     const error = new Error(`Cursor GetUsableModels returned ${response.status}`);
     error.status = response.status;
@@ -172,7 +172,7 @@ export async function resolveCursorModels(credentials, options = {}) {
   }
 
   try {
-    const models = await fetchCursorCatalog(credentials, options.signal);
+    const models = await fetchCursorCatalog(credentials, options.signal, options.transport);
     if (!models?.length) return null;
     catalogCache.set(key, { expiresAt: now + CACHE_TTL_MS, models });
     return { models };

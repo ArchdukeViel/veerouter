@@ -16,7 +16,7 @@ import {
   GROK_CLI_VERSION,
 } from "../../config/grokCli.js";
 
-export default {
+const defaultExport = {
   id: "grok-cli",
   priority: 275,
   alias: "gcli",
@@ -94,3 +94,4 @@ export default {
     refreshLeadMs: 5 * 60 * 1000,
   },
 };
+export default defaultExport;

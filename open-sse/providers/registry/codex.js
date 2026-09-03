@@ -1,6 +1,6 @@
 import { withCodexReviewModels } from "../models/helpers.js";
 
-export default {
+const defaultExport = {
   id: "codex",
   priority: 30,
   alias: "cx",
@@ -89,3 +89,4 @@ export default {
     usage: true,
   },
 };
+export default defaultExport;

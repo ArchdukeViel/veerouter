@@ -27,7 +27,7 @@
 // entries: it is what gives the connection a credentials record, and
 // providerSpecificData.baseUrl lives there. Local servers ignore the key itself;
 // any non-empty value works.
-export default {
+const defaultExport = {
   id: "selfhosted-embedding",
   priority: 50,
   hasFree: true,
@@ -71,3 +71,4 @@ export default {
     authHeader: "bearer",
   },
 };
+export default defaultExport;

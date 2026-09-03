@@ -1,5 +1,6 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
+import { getRequestId, handleUnhandledRequestError } from "@/sse/utils/unhandledError.js";
 
 let initialized = false;
 
@@ -27,9 +28,12 @@ export async function OPTIONS() {
 }
 
 export async function POST(request) {  
-  // Fallback to local handling
-  await ensureInitialized();
-  
-  return await handleChat(request);
+  const requestId = getRequestId(request);
+  try {
+    await ensureInitialized();
+    return await handleChat(request, null, requestId);
+  } catch (error) {
+    return handleUnhandledRequestError({ requestId, error, phase: "route_init" });
+  }
 }
 

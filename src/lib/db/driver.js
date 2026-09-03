@@ -1,7 +1,7 @@
 import { ensureDirs, DATA_FILE } from "./paths.js";
 
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
-if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
+if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false, filePath: null };
 const state = global._dbAdapter;
 
 async function tryBunSqlite() {
@@ -74,12 +74,34 @@ async function initAdapter() {
 }
 
 export async function getAdapter() {
+  // Test suites and embedded callers may switch DATA_DIR between isolated
+  // databases in one process. Never reuse a live adapter opened for another
+  // file, or writes can land in the previous database and its file lock can
+  // prevent deterministic cleanup on Windows.
+  if (state.instance && state.filePath !== DATA_FILE) {
+    try { state.instance.close?.(); } catch {}
+    state.instance = null;
+    state.initPromise = null;
+    state.logged = false;
+  }
+
   if (state.instance) return state.instance;
-  if (!state.initPromise) state.initPromise = initAdapter().then((a) => { state.instance = a; return a; });
+  if (!state.initPromise) {
+    state.filePath = DATA_FILE;
+    state.initPromise = initAdapter().then((a) => { state.instance = a; return a; });
+  }
   return state.initPromise;
 }
 
 export function getAdapterSync() {
   if (!state.instance) throw new Error("[DB] adapter not initialized — await getAdapter() first");
   return state.instance;
+}
+
+export function closeAdapter() {
+  try { state.instance?.close?.(); } catch {}
+  state.instance = null;
+  state.initPromise = null;
+  state.filePath = null;
+  state.logged = false;
 }

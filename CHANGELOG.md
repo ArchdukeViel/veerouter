@@ -1,3 +1,36 @@
+# v5.5.4 (2026-09-04)
+
+## Integration
+- Integrate upstream 9Router v0.5.65, including Ollama Cloud web fetch provider,
+  Gemini 3.8 Flash support, Claude Fable 5.1 and Claude Code 2.1.258 fingerprint,
+  Antigravity quota strike breaker, client-side provider status filtering, custom
+  model capability toggles, SSRF guard hardening, [1m] model context marker stripping,
+  and Indonesian localization.
+- Preserve Veerouter's bounded Antigravity empty-stream recovery, account
+  rotation, failure classification, stale-project repair, active-account
+  tracking, thought-signature handling, reasoning model probe timeouts, and
+  request cancellation lifecycle.
+
+# v5.5.3 (2026-08-30)
+
+## Integration
+- Integrate upstream 9Router v0.5.59, including search providers, model
+  catalog synchronization, quota-aware routing, usage accounting, translator
+  fixes, CLI improvements, and dashboard updates.
+- Preserve Veerouter's bounded Antigravity empty-stream recovery, account
+  rotation, failure classification, stale-project repair, active-account
+  tracking, and thought-signature handling.
+
+# v5.5.2 (2026-08-16)
+
+## Integration
+- Integrate upstream 9Router v0.5.55 while preserving Veerouter's bounded
+  Antigravity empty-stream recovery, account rotation, thought-signature
+  handling, stale-project repair, and reproducible CLI verification workflow.
+- Retain upstream security hardening, Gemini 3.7 support, OpenCode fingerprint
+  headers, OpenCode-Go transport routing, SAML, provider additions, usage fixes,
+  and the Docker sql.js fallback.
+
 # v0.5.65 (2026-09-03)
 
 ## Features

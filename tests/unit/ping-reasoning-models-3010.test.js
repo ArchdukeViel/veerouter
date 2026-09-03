@@ -43,6 +43,21 @@ describe("pingModelByKind reasoning models (#3010)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.max_tokens).toBe(1024);
+    expect(body.stream).toBe(false);
+  });
+
+  it("combines the model-test timeout with the caller request signal", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: "Hi" } }] }));
+    const requestController = new AbortController();
+
+    await pingModelByKind("nvidia/moonshotai/kimi-k3", "llm", "http://127.0.0.1:20127", requestController.signal);
+
+    const probeSignal = fetchMock.mock.calls[0][1].signal;
+    expect(probeSignal).not.toBe(requestController.signal);
+    expect(probeSignal.aborted).toBe(false);
+
+    requestController.abort();
+    expect(probeSignal.aborted).toBe(true);
   });
 
   it("treats a reasoning-only (length-limited) response as ok:true", async () => {
@@ -73,5 +88,14 @@ describe("pingModelByKind reasoning models (#3010)", () => {
     fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: "Hello!" } }] }));
     const result = await pingModelByKind("openai/gpt-4o", "llm", "http://127.0.0.1:20127");
     expect(result.ok).toBe(true);
+  });
+
+  it("rejects a completion choice with neither content nor reasoning", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "" } }] }));
+
+    const result = await pingModelByKind("nvidia/moonshotai/kimi-k3", "llm", "http://127.0.0.1:20127");
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/empty completion choice/);
   });
 });

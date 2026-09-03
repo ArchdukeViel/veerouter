@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "kimchi",
   priority: 95,
   alias: "kimchi",
@@ -47,3 +47,4 @@ export default {
   },
   passthroughModels: true,
 };
+export default defaultExport;

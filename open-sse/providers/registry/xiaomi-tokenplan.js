@@ -1,6 +1,6 @@
 import { CLAUDE_API_HEADERS } from "../shared.js";
 
-export default {
+const defaultExport = {
   id: "xiaomi-tokenplan",
   priority: 300,
   alias: "xiaomi-tokenplan",
@@ -61,3 +61,4 @@ export default {
     { id: "mimo-v2.5-tts-voicedesign", name: "MiMo V2.5 TTS Voice Design" },
   ],
 };
+export default defaultExport;

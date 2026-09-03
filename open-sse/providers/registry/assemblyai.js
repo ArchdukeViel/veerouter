@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "assemblyai",
   priority: 30,
   alias: "assemblyai",
@@ -36,3 +36,4 @@ export default {
     format: "assemblyai",
   },
 };
+export default defaultExport;

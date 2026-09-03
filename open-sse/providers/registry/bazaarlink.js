@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "bazaarlink",
   alias: "bzl",
   aliases: ["bazaar-link"],
@@ -45,3 +45,4 @@ export default {
     { id: "nemotron-3-super-120b-a12b", name: "Nemotron 3 Super", contextLength: 1000000 },
   ],
 };
+export default defaultExport;

@@ -152,38 +152,33 @@ export function normalizeClaudePassthrough(body, model = "") {
     if (Object.keys(body.output_config).length === 0) delete body.output_config;
   }
 
-  // 2. Fold mid-conversation system messages into the neighbouring turn.
-  // Hoisting them into body.system would insert volatile content (token counters,
-  // reminders) ahead of the whole conversation and invalidate the prefix cache on
-  // every request. Folding in place keeps the cached prefix stable.
+  // 2. Hoist mid-conversation system messages into the top-level system field.
+  // Claude's Messages API does not accept role:"system" entries in messages.
   if (Array.isArray(body.messages)) {
+    const systemBlocks = [];
     const messages = [];
     for (const msg of body.messages) {
-      if (msg.role !== ROLE.SYSTEM) {
-        messages.push(msg);
+      if (msg.role === ROLE.SYSTEM) {
+        const text = typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content.map(b => (typeof b === "string" ? b : b?.text || "")).join("\n")
+            : "";
+        if (text.trim()) systemBlocks.push({ type: CLAUDE_BLOCK.TEXT, text });
         continue;
       }
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : Array.isArray(msg.content)
-          ? msg.content.map(b => (typeof b === "string" ? b : b?.text || "")).join("\n")
-          : "";
-      if (!text.trim()) continue;
-
-      // Copy-on-write: the caller's body is reused across account-fallback
-      // attempts, so folding must never mutate the original message.
-      const block = { type: CLAUDE_BLOCK.TEXT, text };
-      const prev = messages[messages.length - 1];
-      if (prev?.role === ROLE.USER) {
-        const content = typeof prev.content === "string"
-          ? [{ type: CLAUDE_BLOCK.TEXT, text: prev.content }]
-          : Array.isArray(prev.content) ? [...prev.content] : [];
-        messages[messages.length - 1] = { ...prev, content: [...content, block] };
-        continue;
-      }
-      messages.push({ role: ROLE.USER, content: [block] });
+      messages.push(msg);
     }
-    body.messages = messages;
+
+    if (systemBlocks.length > 0) {
+      const existing = Array.isArray(body.system)
+        ? body.system
+        : typeof body.system === "string" && body.system.trim()
+          ? [{ type: CLAUDE_BLOCK.TEXT, text: body.system }]
+          : [];
+      body.system = [...existing, ...systemBlocks];
+      body.messages = messages;
+    }
   }
 
   // 3. Drop thinking blocks whose signature is not Claude's (combo mixes models,

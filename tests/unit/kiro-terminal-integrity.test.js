@@ -706,6 +706,14 @@ describe("Kiro terminal integrity recovery", () => {
       .mockResolvedValueOnce(new Response("unauthorized", {
         status: 401,
         statusText: "Unauthorized"
+      }))
+      .mockResolvedValueOnce(new Response("unauthorized", {
+        status: 401,
+        statusText: "Unauthorized"
+      }))
+      .mockResolvedValueOnce(new Response("unauthorized", {
+        status: 401,
+        statusText: "Unauthorized"
       }));
 
     const result = await execute();
@@ -719,6 +727,14 @@ describe("Kiro terminal integrity recovery", () => {
   it("bounds the retry HTTP error body", async () => {
     fetchMock
       .mockResolvedValueOnce(response([]))
+      .mockResolvedValueOnce(new Response(`error-start-${"x".repeat(10_000)}-error-tail`, {
+        status: 401,
+        statusText: "Unauthorized"
+      }))
+      .mockResolvedValueOnce(new Response(`error-start-${"x".repeat(10_000)}-error-tail`, {
+        status: 401,
+        statusText: "Unauthorized"
+      }))
       .mockResolvedValueOnce(new Response(`error-start-${"x".repeat(10_000)}-error-tail`, {
         status: 401,
         statusText: "Unauthorized"

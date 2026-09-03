@@ -8,12 +8,13 @@ import { parseModelVoice } from "./_base.js";
 const DEFAULT_MODEL = "mimo-v2.5-tts";
 const DEFAULT_VOICE = "mimo_default";
 
-export default {
+const defaultExport = {
   synthesize(text, model, credentials, responseFormat, { style, language } = {}) {
     if (!credentials?.apiKey) throw new Error("xiaomi-mimo API key required");
     return synthesizeMiMo(text, model, credentials.apiKey, style, language);
   },
 };
+export default defaultExport;
 
 export async function synthesizeMiMo(text, model, apiKey, style, language) {
   const { modelId, voiceId } = parseModelVoice(model, DEFAULT_MODEL, DEFAULT_VOICE, [DEFAULT_MODEL]);

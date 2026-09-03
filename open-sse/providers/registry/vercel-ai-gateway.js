@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "vercel-ai-gateway",
   priority: 160,
   alias: "vercel-ai-gateway",
@@ -39,3 +39,4 @@ export default {
     usageApikey: true,
   },
 };
+export default defaultExport;

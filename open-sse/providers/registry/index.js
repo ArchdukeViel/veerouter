@@ -124,7 +124,7 @@ import p120 from "./fish-audio.js";
 import p121 from "./alitp-intl.js";
 import p122 from "./xquik.js";
 
-export default [
+const defaultExport = [
   p0,
   p1,
   p2,
@@ -248,3 +248,4 @@ export default [
   p121,
   p122,
 ];
+export default defaultExport;

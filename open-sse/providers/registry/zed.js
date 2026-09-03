@@ -1,5 +1,5 @@
 // Zed provider — RSA keypair callback auth (NOT standard OAuth).
-export default {
+const defaultExport = {
   id: "zed",
   priority: 10,
   alias: "zd",
@@ -69,3 +69,4 @@ export default {
     usage: true,
   },
 };
+export default defaultExport;

@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "anthropic",
   priority: 30,
   alias: "anthropic",
@@ -28,3 +28,4 @@ export default {
   ],
   serviceKinds: ["llm","imageToText"],
 };
+export default defaultExport;

@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "google-tts",
   alias: "google-tts",
   display: {
@@ -22,3 +22,4 @@ export default {
     models: []
   }
 };
+export default defaultExport;

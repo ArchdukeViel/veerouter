@@ -1,4 +1,4 @@
-export default {
+const defaultExport = {
   id: "poolside",
   priority: 60,
   alias: "poolside",
@@ -28,3 +28,4 @@ export default {
     { id: "poolside/laguna-xs-2.1", name: "Laguna XS 2.1" },
   ],
 };
+export default defaultExport;

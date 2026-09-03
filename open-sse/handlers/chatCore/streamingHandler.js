@@ -41,43 +41,66 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 }
 
 /**
+ * Consume and normalize an upstream response that cannot be safely piped
+ * through the SSE transform. This is exported so chatCore can reject it
+ * before installing the Antigravity empty-stream retry wrapper.
+ */
+export async function validateSseContentType({ providerResponse, provider, model, streamController, reqTag, log }) {
+  const contentType = (providerResponse.headers.get("content-type") || "").toLowerCase();
+  if (!contentType || contentType.includes("text/event-stream") || contentType.includes("application/json")) return null;
+
+  const bodyText = await providerResponse.text().catch(() => "");
+  const titleMatch = bodyText.match(/<title>([^<]+)<\/title>/i);
+  const sanitizedTitle = (titleMatch?.[1] || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/[\r\n]+/g, " ")
+    .trim()
+    .slice(0, 160);
+  const shortMsg = sanitizedTitle
+    || (bodyText.length < 200
+      ? bodyText.replace(/<[^>]*>/g, "").trim().slice(0, 160)
+      : `Upstream returned non-SSE response (${contentType})`);
+  const status = providerResponse.status || 502;
+  const error = new Error(`upstream non-SSE: ${status}`);
+
+  if (log?.errorLine) log.errorLine(reqTag, "✕", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${contentType})\n    ${shortMsg}`);
+  else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}]`);
+  streamController?.handleError?.(error);
+
+  return {
+    status,
+    message: shortMsg,
+    error,
+    response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
+      status,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    }),
+  };
+}
+
+/**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log }) {
-  if (onRequestSuccess) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, emptyGuardState }) {
+  // Defer the account-success callback until the stream actually produces
+  // SOMETHING — HTTP 200 with zero bytes / thought-only / empty attempts is
+  // still a failure mode for the client. Clearing the account's error state
+  // before that risks marking a quota-exhausted account healthy again from a
+  // 200-with-no-body response.
+  let requestSuccessFired = false;
+  const fireRequestSuccess = () => {
+    if (requestSuccessFired || !onRequestSuccess) return;
+    if (emptyGuardState && !emptyGuardState.meaningful) return;
+    requestSuccessFired = true;
     Promise.resolve()
       .then(onRequestSuccess)
       .catch(err => {
         console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
       });
-  }
+  };
 
-  // When upstream returns HTML/text instead of SSE (e.g. Cloudflare 5xx error
-  // page), piping it through the SSE transform stream causes Next.js
-  // "failed to pipe response" and crashes the chat router. Read the body,
-  // pull a short human-readable message from the <title>, sanitize it, and
-  // return a clean JSON error instead. The message is stripped of HTML tags
-  // and clamped so untrusted upstream text never reaches the client verbatim
-  // (the UI may render error.message as HTML).
-  const upstreamContentType = (providerResponse.headers.get('content-type') || '').toLowerCase();
-  if (upstreamContentType && !upstreamContentType.includes('text/event-stream') && !upstreamContentType.includes('application/json')) {
-    const bodyText = await providerResponse.text().catch(() => '');
-    const titleMatch = bodyText.match(/<title>([^<]+)<\/title>/i);
-    const sanitizedTitle = (titleMatch?.[1] || '').replace(/<[^>]*>/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
-    const shortMsg = sanitizedTitle
-      || (bodyText.length < 200 ? bodyText.replace(/<[^>]*>/g, '').trim().slice(0, 160) : `Upstream returned non-SSE response (${upstreamContentType})`);
-    const status = providerResponse.status || 502;
-    if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${upstreamContentType})\n    ${shortMsg}`);
-    else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}]`);
-    streamController?.handleError?.(new Error(`upstream non-SSE: ${status}`));
-    return {
-      success: false,
-      response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
-        status,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-      }),
-    };
-  }
+  const nonSse = await validateSseContentType({ providerResponse, provider, model, streamController, reqTag, log });
+  if (nonSse) return { success: false, response: nonSse.response };
 
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey });
 
@@ -86,6 +109,19 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+
+  // Tee the stream: fire the deferred success callback the first time a
+  // translated byte actually crosses the wire. A 200 stream that aborts or
+  // empties before emitting anything never reaches this tee and therefore
+  // never clears the account error state.
+  const successTee = new TransformStream({
+    transform(chunk, controller) {
+      fireRequestSuccess();
+      controller.enqueue(chunk);
+    },
+  });
+
+  const finalStream = transformedBody.pipeThrough(successTee);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
@@ -103,7 +139,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 
   return {
     success: true,
-    response: new Response(transformedBody, { headers: SSE_HEADERS })
+    response: new Response(finalStream, { headers: SSE_HEADERS })
   };
 }
 
@@ -113,7 +149,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
-  const onStreamComplete = (contentObj, usage, ttftAt) => {
+  const onStreamComplete = (contentObj, usage, ttftAt, meta) => {
     const latency = {
       ttft: ttftAt ? ttftAt - requestStartTime : Date.now() - requestStartTime,
       total: Date.now() - requestStartTime
@@ -121,16 +157,32 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;
 
+    // Truthful status: an exhausted empty stream (no content + embedded error
+    // or "error" finish from the empty-stream guard) is a failed attempt, not a
+    // healthy completion. Mark it "error" so the request-detail panel renders
+    // the real cause instead of a misleading ordinary assistant turn.
+    const isExhausted = meta?.empty && (meta?.upstreamError || meta?.finishReason === "error");
+    const status = isExhausted ? "error" : "success";
+    const reportedContent = isExhausted
+      ? `[Empty streaming response] upstream=${meta?.upstreamError?.status || meta?.finishReason || "EMPTY_RESPONSE"}`
+      : safeContent;
+
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency,
       tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: finalBody || translatedBody || null,
-      providerResponse: safeContent,
-      response: { content: safeContent, thinking: safeThinking, type: "streaming" },
+      providerResponse: reportedContent,
+      response: {
+        content: reportedContent,
+        thinking: safeThinking,
+        type: "streaming",
+        finishReason: meta?.finishReason,
+        upstreamError: meta?.upstreamError,
+      },
       pxpipe,
-      status: "success"
+      status
     }, { id: streamDetailId })).catch(err => {
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });

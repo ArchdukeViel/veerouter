@@ -14,12 +14,20 @@ function getTimeString() {
  * @param {object} options.log - Logger instance
  * @param {string} options.provider - Provider name
  * @param {string} options.model - Model name
+ * @param {AbortSignal} options.requestSignal - Request lifecycle signal from the route
  */
-export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "" } = {}) {
+export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "", requestSignal } = {}) {
   const abortController = new AbortController();
   const startTime = Date.now();
   let disconnected = false;
   let abortTimeout = null;
+  let requestAbortListener = null;
+
+  const removeRequestAbortListener = () => {
+    if (!requestSignal || !requestAbortListener || typeof requestSignal.removeEventListener !== "function") return;
+    requestSignal.removeEventListener("abort", requestAbortListener);
+    requestAbortListener = null;
+  };
 
   // Only abnormal terminations are logged; normal completion is covered by "📊 done".
   // isError uses errorLine (always shown, ignores LOG_LEVEL) so failures survive quiet levels.
@@ -30,60 +38,83 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
     else console.log(`[${getTimeString()}] ${symbol} ${provider}/${model} · ${status} · ${duration}ms`);
   };
 
+  const handleDisconnect = (reason = "client_closed") => {
+    if (disconnected) return;
+    disconnected = true;
+    removeRequestAbortListener();
+
+    // Debug-only: Responses API has no [DONE] sentinel, so codex/droid close the
+    // socket on every completed request. "📊 done" is the authoritative outcome line.
+    dbg("CTRL", `${provider}/${model} | disconnect=${reason} | dur=${Date.now() - startTime}ms`);
+
+    // Delay abort to allow cleanup
+    abortTimeout = setTimeout(() => {
+      abortController.abort();
+    }, 500);
+
+    onDisconnect?.({ reason, duration: Date.now() - startTime });
+  };
+
+  const handleComplete = () => {
+    if (disconnected) return;
+    disconnected = true;
+    removeRequestAbortListener();
+
+    if (abortTimeout) {
+      clearTimeout(abortTimeout);
+      abortTimeout = null;
+    }
+  };
+
+  const handleError = (error) => {
+    if (disconnected) return;
+    disconnected = true;
+    removeRequestAbortListener();
+
+    if (abortTimeout) {
+      clearTimeout(abortTimeout);
+      abortTimeout = null;
+    }
+
+    if (error.name === "AbortError") {
+      logStream("⚡", "ABORTED");
+      return;
+    }
+
+    logStream("✗", `ERROR: ${error.message}${error.stack ? `\n    ${error.stack}` : ""}`, true);
+    onError?.(error);
+  };
+
+  // The route request can be aborted even when no response stream exists yet
+  // (for example, the dashboard model probe). Tie that lifecycle to the same
+  // controller used by the executor so the upstream fetch is cancelled too.
+  const handleRequestAbort = () => {
+    if (disconnected) return;
+    handleDisconnect("request_aborted");
+    if (abortTimeout) {
+      clearTimeout(abortTimeout);
+      abortTimeout = null;
+    }
+    abortController.abort();
+  };
+
+  if (requestSignal && typeof requestSignal.addEventListener === "function") {
+    requestAbortListener = handleRequestAbort;
+    if (requestSignal.aborted) handleRequestAbort();
+    else requestSignal.addEventListener("abort", requestAbortListener, { once: true });
+  }
+
   return {
     signal: abortController.signal,
     startTime,
-
     isConnected: () => !disconnected,
-
-    // Call when client disconnects
-    handleDisconnect: (reason = "client_closed") => {
-      if (disconnected) return;
-      disconnected = true;
-
-      // Debug-only: Responses API has no [DONE] sentinel, so codex/droid close the
-      // socket on every completed request. "📊 done" is the authoritative outcome line.
-      dbg("CTRL", `${provider}/${model} | disconnect=${reason} | dur=${Date.now() - startTime}ms`);
-
-      // Delay abort to allow cleanup
-      abortTimeout = setTimeout(() => {
-        abortController.abort();
-      }, 500);
-
-      onDisconnect?.({ reason, duration: Date.now() - startTime });
-    },
-
-    // Call when stream completes normally (no line here — "📊 done" is authoritative)
-    handleComplete: () => {
-      if (disconnected) return;
-      disconnected = true;
-
-      if (abortTimeout) {
-        clearTimeout(abortTimeout);
-        abortTimeout = null;
-      }
-    },
-
-    // Call on error
-    handleError: (error) => {
-      if (disconnected) return;
-      disconnected = true;
-
-      if (abortTimeout) {
-        clearTimeout(abortTimeout);
-        abortTimeout = null;
-      }
-
-      if (error.name === "AbortError") {
-        logStream("⚡", "ABORTED");
-        return;
-      }
-
-      logStream("✗", `ERROR: ${error.message}${error.stack ? `\n    ${error.stack}` : ""}`, true);
-      onError?.(error);
-    },
-
-    abort: () => abortController.abort()
+    handleDisconnect,
+    handleComplete,
+    handleError,
+    abort: () => {
+      removeRequestAbortListener();
+      abortController.abort();
+    }
   };
 }
 

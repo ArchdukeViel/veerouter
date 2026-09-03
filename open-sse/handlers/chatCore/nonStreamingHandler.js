@@ -21,6 +21,12 @@ function parseToolArguments(value) {
   }
 }
 
+function hasMeaningfulDetailValue(value) {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return value !== undefined && value !== null;
+}
+
 function openAICompletionToClaudeMessage(responseBody) {
   if (!responseBody?.choices?.[0]) return responseBody;
   const choice = responseBody.choices[0];
@@ -362,7 +368,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // reasoning_content is the only useful output and must be preserved.
   if (!isClaudeMessageResponse && !isResponsesResponse && translatedResponse?.choices) {
     for (const choice of translatedResponse.choices) {
-      if (choice?.message?.reasoning_content && choice.message.content) {
+      if (choice?.message?.reasoning_content && hasMeaningfulDetailValue(choice.message.content)) {
         delete choice.message.reasoning_content;
       }
     }
@@ -371,6 +377,37 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   reqLogger.logConvertedResponse(translatedResponse);
 
   const totalLatency = Date.now() - requestStartTime;
+  const detailMessage = translatedResponse?.choices?.[0]?.message || {};
+  const detailContent = detailMessage.content || translatedResponse?.content || null;
+  const detailThinking = detailMessage.reasoning_content
+    || detailMessage.reasoning
+    || detailMessage.thinking
+    || detailMessage.thinking_content
+    || detailMessage.provider_specific_fields?.reasoning_content
+    || translatedResponse?.reasoning_content
+    || translatedResponse?.reasoning
+    || translatedResponse?.thinking
+    || null;
+  const detailHasToolCalls = Array.isArray(detailMessage.tool_calls) && detailMessage.tool_calls.length > 0;
+  const detailHasStructuredOutput = isResponsesResponse && Array.isArray(translatedResponse?.output) && translatedResponse.output.length > 0;
+  const detailHasMeaningfulOutput =
+    hasMeaningfulDetailValue(detailContent) ||
+    hasMeaningfulDetailValue(detailThinking) ||
+    detailHasToolCalls ||
+    detailHasStructuredOutput;
+  const detailResponse = {
+    // Make reasoning-only completions visible in the request-detail panel while
+    // keeping the full reasoning in its separate field.
+    content: hasMeaningfulDetailValue(detailContent)
+      ? detailContent
+      : (hasMeaningfulDetailValue(detailThinking)
+        ? "[Reasoning-only response]"
+        : (detailHasStructuredOutput ? "[Structured response output]" : null)),
+    thinking: detailThinking,
+    finish_reason: translatedResponse?.choices?.[0]?.finish_reason || "unknown",
+  };
+  if (!detailHasMeaningfulOutput) detailResponse.error = "Provider returned an empty completion";
+
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
     latency: { ttft: totalLatency, total: totalLatency },
@@ -378,13 +415,9 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     request: extractRequestConfig(body, stream),
     providerRequest: finalBody || translatedBody || null,
     providerResponse: responseBody || null,
-    response: {
-      content: translatedResponse?.choices?.[0]?.message?.content || translatedResponse?.content || null,
-      thinking: translatedResponse?.choices?.[0]?.message?.reasoning_content || translatedResponse?.reasoning_content || null,
-      finish_reason: translatedResponse?.choices?.[0]?.finish_reason || "unknown"
-    },
+    response: detailResponse,
     pxpipe,
-    status: "success"
+    status: detailHasMeaningfulOutput ? "success" : "error"
   }, { endpoint: clientRawRequest?.endpoint || null })).catch(err => {
     console.error("[RequestDetail] Failed to save:", err.message);
   });

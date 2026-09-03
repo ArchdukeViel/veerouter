@@ -17,7 +17,8 @@ import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
 import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
 import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
-import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/streamingHandler.js";
+import { handleStreamingResponse, buildOnStreamComplete, validateSseContentType } from "./chatCore/streamingHandler.js";
+import { createEmptyRetryStream } from "./chatCore/emptyStreamGuard.js";
 import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
 import { dedupeTools } from "../utils/toolDeduper.js";
 import { injectCaveman } from "../rtk/caveman.js";
@@ -58,7 +59,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, onUpstreamEmptyExhausted, onAccountExhausted, onStaleProject, chatCoreCtx, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, requestSignal }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -69,7 +70,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       return connectionId || "";
     }
   })();
-  const reqTag = log?.tagForSession ? log.tagForSession(sessionSeed) : (log?.nextTag ? log.nextTag() : "");
+  const sessionTag = log?.tagForSession ? log.tagForSession(sessionSeed) : (log?.nextTag ? log.nextTag() : "");
+  const requestId = clientRawRequest?.requestId || clientRawRequest?.headers?.["x-request-id"] || "";
+  const reqTag = requestId ? `${sessionTag} rid=${requestId}` : sessionTag;
 
   const sourceFormat = sourceFormatOverride || detectFormat(body);
 
@@ -162,7 +165,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     // Convert remote image URLs to base64 for targets that can't fetch URLs.
     try {
-      const n = await prefetchRemoteImages(body, sourceFormat, targetFormat, { signal: undefined });
+      const n = await prefetchRemoteImages(body, sourceFormat, targetFormat, { signal: requestSignal });
       if (n > 0) log?.debug?.("MODALITY", `prefetched ${n} remote image(s) for ${targetFormat}`);
     } catch (e) { log?.warn?.("MODALITY", `image prefetch failed: ${e.message}`); }
   }
@@ -314,8 +317,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       if (onDisconnect) onDisconnect(reason);
     },
     onError: () => trackPendingRequest(model, provider, connectionId, false),
-    log, provider, model, reqTag
+    log, provider, model, reqTag, requestSignal
   });
+
+  if (chatCoreCtx) {
+    chatCoreCtx.translatedBody = translatedBody;
+    chatCoreCtx.streamControllerSignal = streamController.signal;
+  }
 
   const proxyOptions = {
     connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
@@ -426,6 +434,23 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Provider returned error
+  if (!providerResponse.ok && provider === "antigravity" && providerResponse.status === 404 && onStaleProject && credentials?.projectId) {
+    try {
+      const repaired = await onStaleProject({ credentials, connectionId, model });
+      if (repaired) {
+        const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
+        providerResponse = retryResult.response;
+        providerUrl = retryResult.url;
+        providerHeaders = retryResult.headers;
+        finalBody = retryResult.transformedBody || finalBody;
+        providerResponseFormat = retryResult.responseFormat || targetFormat;
+        reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+      }
+    } catch (error) {
+      log?.warn?.("PROJECT", `${provider.toUpperCase()} | projectId repair retry failed: ${error?.message || error}`);
+    }
+  }
+
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
@@ -450,7 +475,69 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs);
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  // Antigravity empty-stream guard — oh-my-pi parity: bytes (thinking included)
+  // stream to the client live; emptiness is judged per upstream attempt and an
+  // empty attempt is retried in-stream with the identical request, spliced into
+  // the same client message (see emptyStreamGuard.js). Exhaustion surfaces as an
+  // in-stream error event (retryable by Claude Code); onUpstreamEmptyExhausted
+  // lets the caller bench the account so the client's retry rotates to the next
+  // one (#2188, #2229, #2250, #2259, #2431).
+  // Validate the wire format before any provider-specific retry wrapper can
+  // inspect the body. A 200 text/html error page is a terminal upstream
+  // response, not an empty SSE attempt to replay.
+  if (stream) {
+    const nonSse = await validateSseContentType({ providerResponse, provider, model, streamController, reqTag, log });
+    if (nonSse) return { success: false, status: nonSse.status, error: nonSse.message, response: nonSse.response };
+  }
+
+  let emptyGuardState = null;
+  if (provider === "antigravity" && stream) {
+    emptyGuardState = { meaningful: false, exhausted: false };
+    const reexecute = async () => {
+      const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
+      if (!retryResult.response.ok) {
+        const { statusCode, message } = await parseUpstreamError(retryResult.response, executor);
+        throw new Error(`[${statusCode}] ${message}`);
+      }
+      if (!retryResult.response.body) return null;
+      return retryResult.response.body;
+    };
+    providerResponse = new Response(
+      createEmptyRetryStream({
+        body: providerResponse.body,
+        reexecute,
+        signal: streamController.signal,
+        log,
+        provider,
+        authType: credentials?.authType,
+        state: emptyGuardState,
+        connectionId,
+        onAccountExhausted: onAccountExhausted ? async ({ reason, upstreamError, currentConnectionId }) => {
+          const resetMs = executor.parseRetryFromErrorMessage?.(upstreamError?.message || reason);
+          return onAccountExhausted({
+            reason: formatProviderError(new Error(reason), provider, model, HTTP_STATUS.BAD_GATEWAY),
+            upstreamError,
+            currentConnectionId,
+            resetsAtMs: resetMs ? Date.now() + resetMs : undefined,
+            translatedBody,
+            model,
+            stream,
+          });
+        } : undefined,
+        onExhausted: (reason, { upstreamError } = {}) => {
+          if (!onUpstreamEmptyExhausted) return;
+          const resetMs = executor.parseRetryFromErrorMessage?.(upstreamError?.message || reason);
+          return onUpstreamEmptyExhausted(
+            formatProviderError(new Error(reason), provider, model, HTTP_STATUS.BAD_GATEWAY),
+            resetMs ? Date.now() + resetMs : undefined
+          );
+        },
+      }),
+      { status: providerResponse.status, headers: providerResponse.headers }
+    );
+  }
+
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, emptyGuardState };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

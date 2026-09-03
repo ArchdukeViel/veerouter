@@ -22,15 +22,54 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
-import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { getProjectIdForConnection, invalidateProjectId } from "open-sse/services/projectId.js";
+import { getExecutor } from "open-sse/executors/index.js";
+import { classifyFailure, classifyThrownError, isRetryableStatus } from "open-sse/utils/failureClassifier.js";
+import { executeWithStaleProjectRepair, repairStaleProjectId } from "open-sse/utils/projectRepair.js";
+import { getRequestId, handleUnhandledRequestError } from "../utils/unhandledError.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+
+/**
+ * Classify an upstream HTTP status for account-rotation policy.
+ *
+ * Retryable across accounts (transient / quota / server-side problems):
+ *   408 Request Timeout, 425 Too Early, 429 Too Many Requests, 500 Internal
+ *   Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout,
+ *   507 Insufficient Storage, 522/523/524 Cloudflare-style.
+ *
+ * Deterministic (do NOT rotate — every account will see the same outcome):
+ *   400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found,
+ *   405 Method Not Allowed, 406 Not Acceptable, 409 Conflict (when not a
+ *   concurrent-write race), 410 Gone, 411 Length Required, 412 Precondition
+ *   Failed, 413 Payload Too Large, 414 URI Too Long, 415 Unsupported Media,
+ *   416 Range Not Satisfiable, 417 Expectation Failed, 418/421/422/426.
+ */
+export function isRetryableError(err) {
+  return !!classifyThrownError(err).retryable;
+}
+
+export { isRetryableStatus };
 
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
-export async function handleChat(request, clientRawRequest = null) {
+export async function handleChat(request, clientRawRequest = null, requestIdOverride = null) {
+  const requestId = getRequestId(request, requestIdOverride || clientRawRequest?.requestId);
+  try {
+    return await handleChatInternal(request, clientRawRequest, requestId);
+  } catch (error) {
+    return handleUnhandledRequestError({
+      requestId,
+      error,
+      phase: "route",
+      model: clientRawRequest?.body?.model,
+    });
+  }
+}
+
+async function handleChatInternal(request, clientRawRequest = null, requestId) {
   let body;
   try {
     body = await request.json();
@@ -48,6 +87,7 @@ export async function handleChat(request, clientRawRequest = null) {
       headers: Object.fromEntries(request.headers.entries())
     };
   }
+  clientRawRequest = { ...clientRawRequest, requestId };
   // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
   // no combo, alias or provider/model pair, so it must not reach resolution.
   // The capability travels in the anthropic-beta header, forwarded as-is.
@@ -227,11 +267,94 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
+  const attemptedConnectionIds = new Set();
+  const MAX_ACCOUNT_ATTEMPTS = 8;
   let lastError = null;
   let lastStatus = null;
 
-  while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+  const requestId = clientRawRequest?.requestId || getRequestId(request);
+  const accountIdOf = (account) => account?.connectionId || account?.id || "";
+  const logRecoveryError = (error, phase, connectionId = "") => {
+    handleUnhandledRequestError({
+      requestId,
+      error,
+      phase,
+      provider,
+      model,
+      connectionId,
+    });
+  };
+  const benchAccount = async (connectionId, status, reason, resetsAtMs) => {
+    if (connectionId) excludeConnectionIds.add(connectionId);
+    if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+    try {
+      return await markAccountUnavailable(connectionId, status, reason, provider, model, resetsAtMs);
+    } catch (error) {
+      // Persistence failure must not make the selector eligible again in this
+      // request. The local exclusion set is the safety net.
+      logRecoveryError(error, "bench", connectionId);
+      return { shouldFallback: true, cooldownMs: 0, persistenceFailed: true };
+    }
+  };
+  const prepareAccount = async (candidate, phase) => {
+    const connectionId = accountIdOf(candidate);
+    let refreshedCredentials;
+    try {
+      refreshedCredentials = await checkAndRefreshToken(provider, candidate);
+    } catch (error) {
+      logRecoveryError(error, "refresh_token", connectionId);
+      return { ok: false, connectionId, error, phase: "refresh_token" };
+    }
+    if (!refreshedCredentials) {
+      const error = new Error("credential refresh returned no credentials");
+      logRecoveryError(error, "refresh_token", connectionId);
+      return { ok: false, connectionId, error, phase: "refresh_token" };
+    }
+
+    if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
+      let projectId = null;
+      try {
+        projectId = await getProjectIdForConnection(connectionId, refreshedCredentials.accessToken, provider);
+      } catch (error) {
+        logRecoveryError(error, "resolve_project", connectionId);
+      }
+      if (!projectId) {
+        const error = new Error(`${phase}: projectId resolution failed`);
+        logRecoveryError(error, "resolve_project", connectionId);
+        return { ok: false, connectionId, error, phase: "resolve_project" };
+      }
+      refreshedCredentials.projectId = projectId;
+      try {
+        const persisted = await updateProviderCredentials(connectionId, { projectId });
+        if (!persisted) log.warn("RECOVERY", `projectId persistence failed for ${connectionId.slice(0, 8)}`);
+      } catch (error) {
+        // The current request has a valid in-memory projectId; persistence is
+        // best effort and must not convert a good provider response into 500.
+        logRecoveryError(error, "persist_project", connectionId);
+      }
+    }
+
+    return {
+      ok: true,
+      connectionId,
+      credentials: refreshedCredentials,
+      proxyOptions: {
+        connectionProxyEnabled: refreshedCredentials?.providerSpecificData?.connectionProxyEnabled === true,
+        connectionProxyUrl: refreshedCredentials?.providerSpecificData?.connectionProxyUrl || "",
+        connectionNoProxy: refreshedCredentials?.providerSpecificData?.connectionNoProxy || "",
+        vercelRelayUrl: refreshedCredentials?.providerSpecificData?.vercelRelayUrl || "",
+      },
+    };
+  };
+
+  for (let accountAttempt = 0; accountAttempt < MAX_ACCOUNT_ATTEMPTS; accountAttempt++) {
+    let credentials;
+    try {
+      credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    } catch (error) {
+      logRecoveryError(error, "select_account");
+      return errorResponse(500, `Internal routing error (request_id=${requestId})`);
+    }
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -250,28 +373,174 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
-    const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
-
-    // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
-    if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
-      const pid = await getProjectIdForConnection(credentials.connectionId, refreshedCredentials.accessToken, provider);
-      if (pid) {
-        refreshedCredentials.projectId = pid;
-        // Persist to DB in background so subsequent requests have it immediately
-        updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => { });
-      }
+    const connectionId = accountIdOf(credentials);
+    if (connectionId && attemptedConnectionIds.has(connectionId)) {
+      excludeConnectionIds.add(connectionId);
+      continue;
     }
+    if (connectionId) attemptedConnectionIds.add(connectionId);
+
+    const prepared = await prepareAccount(credentials, "initial");
+    if (!prepared.ok) {
+      await benchAccount(prepared.connectionId, prepared.phase === "refresh_token" ? HTTP_STATUS.UNAUTHORIZED : HTTP_STATUS.SERVICE_UNAVAILABLE, prepared.error.message);
+      lastError = prepared.error.message;
+      lastStatus = prepared.phase === "refresh_token" ? HTTP_STATUS.UNAUTHORIZED : HTTP_STATUS.SERVICE_UNAVAILABLE;
+      continue;
+    }
+    const refreshedCredentials = prepared.credentials;
 
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+
+    // Mutable active-account context — threads the LIVE account identity through
+    // every callback (success/refresh/rotate) so that after A → B rotation the
+    // success callback clears B, not A. Capturing `credentials` directly in any
+    // closure makes success clearing target the originally opened account, which
+    // can resurrect a freshly benched account as soon as a sibling succeeds.
+    const initialProxyOptions = prepared.proxyOptions;
+    const activeAccount = {
+      connectionId: prepared.connectionId,
+      credentials: refreshedCredentials,
+      proxyOptions: initialProxyOptions,
+      reexecute: null,
+    };
+
+    const chatCoreCtx = { activeAccount };
+
+    const onAccountExhausted = async ({ reason, upstreamError, currentConnectionId, resetsAtMs }) => {
+      // Bench locally before persistence so a failed DB update cannot make the
+      // account eligible again during this request.
+      const currentId = currentConnectionId || activeAccount.connectionId;
+      if (currentId) {
+        excludeConnectionIds.add(currentId);
+        attemptedConnectionIds.add(currentId);
+      }
+      try {
+        await benchAccount(currentId, HTTP_STATUS.BAD_GATEWAY, reason, resetsAtMs);
+      } catch (error) {
+        logRecoveryError(error, "bench_rotation", currentId);
+      }
+
+      // Select the next eligible account. A candidate can fail refresh or
+      // project setup; keep searching within a bounded request-local budget.
+      for (let rotationAttempt = 0; rotationAttempt < MAX_ACCOUNT_ATTEMPTS; rotationAttempt++) {
+      let next;
+      try {
+        next = await getProviderCredentials(provider, excludeConnectionIds, model);
+      } catch (error) {
+        logRecoveryError(error, "select_rotation_account", currentId);
+        return null;
+      }
+      if (!next || next.allRateLimited) return null;
+
+      const nextId = accountIdOf(next);
+      if (!nextId || attemptedConnectionIds.has(nextId) || excludeConnectionIds.has(nextId)) {
+        if (nextId) excludeConnectionIds.add(nextId);
+        continue;
+      }
+      attemptedConnectionIds.add(nextId);
+
+      // Refresh the candidate and resolve any account-scoped project binding.
+      let nextRefreshed;
+      try {
+        nextRefreshed = await checkAndRefreshToken(provider, next);
+      } catch (error) {
+        logRecoveryError(error, "refresh_rotation", nextId);
+        await benchAccount(nextId, HTTP_STATUS.UNAUTHORIZED, error?.message || "rotation refresh failed");
+        continue;
+      }
+      if (!nextRefreshed) {
+        await benchAccount(nextId, HTTP_STATUS.UNAUTHORIZED, "rotation refresh returned no credentials");
+        continue;
+      }
+      if ((provider === "antigravity" || provider === "gemini-cli") && !nextRefreshed.projectId) {
+        let pid = null;
+        try {
+          pid = await getProjectIdForConnection(nextId, nextRefreshed.accessToken, provider);
+        } catch (error) {
+          logRecoveryError(error, "resolve_project_rotation", nextId);
+        }
+        if (!pid) {
+          await benchAccount(nextId, HTTP_STATUS.SERVICE_UNAVAILABLE, "rotation projectId resolution failed");
+          continue;
+        }
+        nextRefreshed.projectId = pid;
+        updateProviderCredentials(nextId, { projectId: pid }).catch((error) => {
+          logRecoveryError(error, "persist_project_rotation", nextId);
+        });
+      }
+
+      // 5. Recompute proxy options from new account credentials
+      const nextProxyOptions = {
+        connectionProxyEnabled: nextRefreshed?.providerSpecificData?.connectionProxyEnabled === true,
+        connectionProxyUrl: nextRefreshed?.providerSpecificData?.connectionProxyUrl || "",
+        connectionNoProxy: nextRefreshed?.providerSpecificData?.connectionNoProxy || "",
+        vercelRelayUrl: nextRefreshed?.providerSpecificData?.vercelRelayUrl || "",
+      };
+
+      log.warn("ROTATE", `⇄ ACC:${currentConnectionId.slice(0, 8)} EMPTY-EXHAUSTED → ACC:${nextRefreshed.connectionName || next.connectionId.slice(0, 8)}`);
+      log.warn("ROTATE", `    reason=${reason?.slice?.(0, 80)} | upstream=${upstreamError?.status || upstreamError?.code || "EMPTY"}`);
+
+      // 6. Build reexecute factory bound to the NEW account. The empty-stream
+      //    guard calls this on every retry after rotation; using live activeAccount
+      //    fields ensures later rotation hops stay consistent.
+      const rotatedReexecute = async () => {
+        const retryResult = await executeWithStaleProjectRepair({
+          provider,
+          credentials: nextRefreshed,
+          connectionId: nextId,
+          execute: () => getExecutor(provider).execute({
+            model,
+            body: chatCoreCtx.translatedBody,
+            stream: true,
+            credentials: nextRefreshed,
+            signal: chatCoreCtx.streamControllerSignal,
+            log,
+            proxyOptions: nextProxyOptions,
+          }),
+          invalidateProjectId,
+          resolveProjectId: getProjectIdForConnection,
+          persistProjectId: updateProviderCredentials,
+          log,
+        });
+        if (!retryResult.response.ok) {
+          const status = retryResult.response.status;
+          const err = new Error(`[${status}] rotation upstream non-2xx`);
+          err.status = status;
+          err.failure = classifyFailure({ status, provider, authType: nextRefreshed.authType, message: err.message });
+          throw err;
+        }
+        if (!retryResult.response.body) {
+          return null;
+        }
+        return retryResult.response.body;
+      };
+
+      // 7. Update the active-account context so any later callback
+      //    (success / refresh / rotate) targets the new account.
+      activeAccount.connectionId = nextId;
+      activeAccount.credentials = nextRefreshed;
+      activeAccount.proxyOptions = nextProxyOptions;
+      activeAccount.reexecute = rotatedReexecute;
+
+      return {
+        connectionId: nextId,
+        credentials: nextRefreshed,
+        proxyOptions: nextProxyOptions,
+        reexecute: rotatedReexecute,
+      };
+      }
+      return null;
+    };
+
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
       clientRawRequest,
-      connectionId: credentials.connectionId,
+      connectionId: prepared.connectionId,
       userAgent,
       apiKey,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
@@ -291,44 +560,89 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      // Preserve the framework request lifecycle so non-streaming probes and
+      // other clients that disconnect before a response stream exists cancel
+      // the upstream provider fetch as well.
+      requestSignal: request?.signal,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
+      // Active-account context (via chatCoreCtx) — every callback reads/writes
+      // THIS object so success clearing targets whichever account actually
+      // emitted the bytes, not the originally selected one.
+      chatCoreCtx,
+      onStaleProject: async () => repairStaleProjectId({
+        provider,
+        credentials: activeAccount.credentials,
+        connectionId: activeAccount.connectionId,
+        invalidateProjectId,
+        resolveProjectId: getProjectIdForConnection,
+        persistProjectId: updateProviderCredentials,
+        log,
+      }),
       onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
+        // Persist refreshed token to DB using the LIVE connectionId. The
+        // chatCore already mutates the same credentials object passed in, so
+        // activeAccount.credentials is kept in sync automatically.
+        await updateProviderCredentials(activeAccount.connectionId, {
           ...newCreds,
-          existingProviderSpecificData: credentials.providerSpecificData,
+          existingProviderSpecificData: activeAccount.credentials?.providerSpecificData,
           testStatus: "active"
         });
       },
       onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials, model);
+        // Clear the account that ACTUALLY produced output, not the original.
+        try {
+          await clearAccountError(activeAccount.connectionId, activeAccount.credentials, model);
+        } catch (error) {
+          logRecoveryError(error, "clear_account", activeAccount.connectionId);
+        }
         // "Consecutive" strikes: a success clears the breaker for this pair.
-        clearAntigravityStrikes(credentials.connectionId, model);
-      }
+        clearAntigravityStrikes(activeAccount.connectionId, model);
+      },
+      onUpstreamEmptyExhausted: async (reason, resetsAtMs) => {
+        // Fallback path: legacy callback when rotation is unavailable. Use the
+        // live active-account identity so a rotated account's failure benches
+        // itself, not the original opener.
+        await benchAccount(activeAccount.connectionId, HTTP_STATUS.BAD_GATEWAY, reason, resetsAtMs);
+      },
+      onAccountExhausted,
     });
 
     if (result.success) return result.response;
 
-    // Antigravity 409/429: refresh live quota to get exact resetAt before locking
+    // Antigravity 409/429: refresh live quota to get exact resetAt before locking.
+    // Use the live account context because empty-stream recovery may already have
+    // rotated from the account that opened this request.
+    const failedConnectionId = activeAccount.connectionId || prepared.connectionId;
     let quotaResetMs = null;
     let resetsAtMs = result.resetsAtMs;
     if (provider === "antigravity" && (result.status === 409 || result.status === 429)) {
       quotaResetMs = await handleAntigravityQuotaError(
-        credentials.connectionId, result.status, model,
-        refreshedCredentials.accessToken, credentials.providerSpecificData
+        failedConnectionId,
+        result.status,
+        model,
+        activeAccount.credentials?.accessToken,
+        activeAccount.credentials?.providerSpecificData
       );
       if (quotaResetMs) resetsAtMs = quotaResetMs;
     }
 
-    // Exhausted Antigravity model is blocked only in RAM cache until upstream resetAt.
-    // Do not persist a modelLock_* for this path.
-    const shouldFallback = provider === "antigravity" && quotaResetMs
-      ? true
-      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
+    // Exhausted Antigravity model quota is blocked in the in-memory quota cache;
+    // avoid persisting a modelLock_* for this precise upstream reset path.
+    let benchResult;
+    try {
+      benchResult = quotaResetMs
+        ? { shouldFallback: true, quotaCached: true }
+        : ((await benchAccount(failedConnectionId, result.status, result.error, resetsAtMs)) || { shouldFallback: false });
+    } catch (error) {
+      logRecoveryError(error, "bench_result", failedConnectionId);
+      benchResult = { shouldFallback: true, persistenceFailed: true };
+    }
+    const { shouldFallback } = benchResult;
 
     if (shouldFallback) {
-      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
-      excludeConnectionIds.add(credentials.connectionId);
+      log.warn("FALLBACK", `⇄ ACC:${activeAccount.credentials?.connectionName || failedConnectionId} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
+      excludeConnectionIds.add(failedConnectionId);
       lastError = result.error;
       lastStatus = result.status;
       continue;

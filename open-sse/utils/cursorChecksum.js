@@ -142,9 +142,10 @@ export function buildCursorHeaders(accessToken, machineId = null, ghostMode = tr
   };
 }
 
-export default {
+const defaultExport = {
   generateCursorChecksum,
   buildCursorHeaders,
   generateHashed64Hex,
   generateSessionId
 };
+export default defaultExport;

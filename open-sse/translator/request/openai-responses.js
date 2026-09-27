@@ -66,7 +66,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     // Fallback: if no type but has role property, treat as message
     const itemType = item.type || (item.role ? RESPONSES_ITEM.MESSAGE : null);
 
-    if (itemType === RESPONSES_ITEM.MESSAGE) {
+    if (itemType === RESPONSES_ITEM.MESSAGE || itemType === "agent_message") {
       // Flush any pending assistant message with tool calls
       if (currentAssistantMsg) {
         result.messages.push(currentAssistantMsg);
@@ -92,9 +92,11 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
           return c;
         })
         : item.content;
-      const msg = { role: item.role, content };
+      const rawRole = typeof item.role === "string" ? item.role.trim().toLowerCase() : "";
+      const role = (!rawRole || rawRole === "agent") ? ROLE.USER : rawRole;
+      const msg = { role, content };
       // Attach buffered reasoning to assistant turn (required by xiaomi-mimo + store=false continuity)
-      if (item.role === ROLE.ASSISTANT) attachPendingReasoning(msg);
+      if (role === ROLE.ASSISTANT) attachPendingReasoning(msg);
       else {
         pendingReasoning = "";
         pendingReasoningEncrypted = "";
@@ -321,7 +323,8 @@ function buildReasoningInputItem(msg) {
 export function openaiToOpenAIResponsesRequest(model, body, stream, credentials) {
   // Body already in Responses API format (e.g. Cursor CLI calling /chat/completions with input[])
   if (body.input) {
-    const out = { ...body, model, stream: true };
+    const normalizedInput = Array.isArray(body.input) ? normalizeResponsesInput(body.input) : body.input;
+    const out = { ...body, input: normalizedInput, model, stream: true };
     if (out.max_output_tokens === undefined) {
       if (out.max_completion_tokens !== undefined) out.max_output_tokens = out.max_completion_tokens;
       else if (out.max_tokens !== undefined) out.max_output_tokens = out.max_tokens;
@@ -344,11 +347,14 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
 
   for (const msg of messages) {
     if (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER) {
-      // Use the first instruction-bearing message as instructions.
+      // Concatenate all instruction-bearing messages as instructions.
       // OpenAI recommends role="developer" for GPT-5/Codex as the system-level prompt.
+      const sysText = extractInstructionsText(msg.content);
       if (!hasSystemMessage) {
-        result.instructions = extractInstructionsText(msg.content);
+        result.instructions = sysText;
         hasSystemMessage = true;
+      } else if (sysText) {
+        result.instructions = result.instructions ? `${result.instructions}\n\n${sysText}` : sysText;
       }
       continue; // Skip instruction messages in input
     }

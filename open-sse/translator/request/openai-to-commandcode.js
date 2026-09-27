@@ -111,7 +111,7 @@ function convertMessages(messages = []) {
     if (!m) continue;
     const role = m.role;
 
-    if (role === ROLE.SYSTEM) {
+    if (role === ROLE.SYSTEM || role === ROLE.DEVELOPER) {
       const t = flattenText(m.content);
       if (t) systemTexts.push(t);
       continue;

@@ -93,9 +93,9 @@ function convertMessages(messages, model) {
     const msg = messages[i];
     let role = msg.role;
 
-    // Normalize: system/tool -> user
-    const wasSystem = role === ROLE.SYSTEM;
-    if (role === ROLE.SYSTEM || role === ROLE.TOOL) {
+    // Normalize: system/developer/tool -> user
+    const wasSystem = role === ROLE.SYSTEM || role === ROLE.DEVELOPER;
+    if (wasSystem || role === ROLE.TOOL) {
       role = ROLE.USER;
     }
 

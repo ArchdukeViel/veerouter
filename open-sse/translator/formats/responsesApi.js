@@ -18,7 +18,36 @@ export function normalizeResponsesInput(input) {
     if (input.length === 0) {
       return [{ type: RESPONSES_ITEM.MESSAGE, role: ROLE.USER, content: [{ type: RESPONSES_ITEM.INPUT_TEXT, text: "..." }] }];
     }
-    return input;
+    let hasAgentMessage = false;
+    for (const item of input) {
+      if (item && typeof item === "object" && !Array.isArray(item) && typeof item.type === "string" && item.type.trim().toLowerCase() === "agent_message") {
+        hasAgentMessage = true;
+        break;
+      }
+    }
+    if (!hasAgentMessage) return input;
+    return input.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+      const rawType = typeof item.type === "string" ? item.type.trim().toLowerCase() : "";
+      if (rawType !== "agent_message") return item;
+      const rawRole = typeof item.role === "string" ? item.role.trim().toLowerCase() : "";
+      const role = (!rawRole || rawRole === "agent")
+        ? ROLE.USER
+        : rawRole === ROLE.DEVELOPER
+          ? ROLE.SYSTEM
+          : rawRole;
+      const {
+        author: _author,
+        recipient: _recipient,
+        internal_chat_message_metadata_passthrough: _metadata,
+        ...rest
+      } = item;
+      return {
+        ...rest,
+        type: RESPONSES_ITEM.MESSAGE,
+        role,
+      };
+    });
   }
   return null;
 }
@@ -105,7 +134,7 @@ export function convertResponsesApiFormat(body) {
     // Fallback: if no type but has role property, treat as message
     const itemType = item.type || (item.role ? RESPONSES_ITEM.MESSAGE : null);
 
-    if (itemType === RESPONSES_ITEM.MESSAGE) {
+    if (itemType === RESPONSES_ITEM.MESSAGE || itemType === "agent_message") {
       // Flush any pending assistant message with tool calls
       if (currentAssistantMsg) {
         result.messages.push(currentAssistantMsg);
@@ -131,7 +160,9 @@ export function convertResponsesApiFormat(body) {
           return c;
         })
         : item.content;
-      result.messages.push({ role: item.role, content });
+      const rawRole = typeof item.role === "string" ? item.role.trim().toLowerCase() : "";
+      const role = (!rawRole || rawRole === "agent") ? ROLE.USER : rawRole;
+      result.messages.push({ role, content });
     }
     else if (itemType === RESPONSES_ITEM.FUNCTION_CALL) {
       // Start or append to assistant message with tool_calls

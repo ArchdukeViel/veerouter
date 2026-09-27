@@ -230,7 +230,7 @@ export function normalizeClaudePassthrough(body, model = "") {
   if (Array.isArray(body.messages)) {
     const messages = [];
     for (const msg of body.messages) {
-      if (msg.role !== ROLE.SYSTEM) {
+      if (msg.role !== ROLE.SYSTEM && msg.role !== ROLE.DEVELOPER) {
         messages.push(msg);
         continue;
       }
